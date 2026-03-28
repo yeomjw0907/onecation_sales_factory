@@ -1,0 +1,393 @@
+lead_research_task:
+  description: >
+    Target country: {target_country}
+    Proposal language: {proposal_language}
+    User query: {lead_query}
+    Lead mode: {lead_mode}
+
+    If lead_mode is "company_name", treat lead_query as one exact company and
+    return that company only if you can gather enough reliable public evidence.
+    If lead_mode is "region_or_industry", find up to {max_companies} companies
+    that match the requested market.
+
+    For each company, collect:
+    company_name, industry, location, contact_email_or_phone, homepage_url_if_any,
+    public_profile_links, source_links, company_size_estimate, revenue_estimate,
+    sub_industry, decision_maker_hint, icp_fit, icp_notes, current_digital_presence.
+
+    Public_profile_links should include any useful external evidence such as
+    Google Business, social pages, directory listings, marketplace pages, or
+    association profiles. Prefer companies where the public footprint reveals a
+    real digital gap that Onecation can solve.
+  expected_output: >
+    First line must be exactly: TOTAL_COMPANIES: N
+    where N is the exact number of rows in the table below.
+
+    Then output one markdown table with exactly N rows and these columns:
+    company_name | industry | location | contact_email_or_phone | homepage_url_if_any |
+    public_profile_links | source_links | company_size_estimate | revenue_estimate |
+    sub_industry | decision_maker_hint | icp_fit | icp_notes | current_digital_presence
+
+    Rules:
+    - Do not invent contact details.
+    - Keep source_links and public_profile_links useful and concrete.
+    - icp_notes must briefly explain why the company is or is not worth pursuing.
+  agent: lead_finder
+
+website_audit_task:
+  description: >
+    Audit every company from lead_research_task. When a homepage URL exists,
+    scrape the website and compare what is on the official site with public
+    information from directories, listings, and public profiles.
+
+    Classify each company into one of these buckets:
+    - no_website: no credible official website was found
+    - outdated_website: a website exists, but it looks stale, weak, broken, or
+      clearly behind current trust and conversion standards
+    - inconsistent_website: a website exists, but important public information
+      appears out of date, incomplete, or inconsistent with external sources
+    - healthy_website: the website appears current enough and not obviously in
+      need of urgent intervention
+
+    For every company, score:
+    - website_urgency_score (0-35)
+    - market_fit_score (0-25)
+    - reachability_score (0-20)
+    - execution_readiness_score (0-20)
+
+    priority_score is the total from 0 to 100.
+    Then assign action_bucket:
+    - hot: 70-100
+    - warm: 50-69
+    - cold: 0-49
+
+    Prioritize companies in no_website, outdated_website, or inconsistent_website
+    when the evidence suggests a credible sales opportunity.
+  expected_output: >
+    First line must be exactly: TOTAL_COMPANIES: N
+    where N matches the number of companies audited.
+
+    Then output one markdown table with exactly N rows and these columns:
+    company_name | website_bucket | key_evidence | mismatch_summary |
+    website_urgency_score | market_fit_score | reachability_score |
+    execution_readiness_score | priority_score | action_bucket | recommended_offer_type
+
+    recommended_offer_type must be one of:
+    relaunch_offer | maintenance_recovery_offer | new_presence_offer | monitor_only
+
+    key_evidence and mismatch_summary must be concrete, short, and evidence-based.
+  agent: website_auditor
+  context:
+    - lead_research_task
+
+competitor_analysis_task:
+  description: >
+    For each prioritized company from website_audit_task, research the local
+    market in the target country and identify 3-5 relevant competitors or
+    alternative providers. Focus on what helps a senior sales proposal:
+    visible positioning, trust signals, website quality, offers, market gaps,
+    buying patterns, and what this company should emphasize or avoid.
+
+    You must be country-aware. Do not force Korean channels or assumptions onto
+    every market. Explain what matters in the target country, including where
+    trust seems to come from and which digital or commercial motions appear to
+    matter most.
+
+    For each company, derive:
+    - market_snapshot
+    - competitor table
+    - strengths_to_amplify
+    - proposal_angles
+    - caution_points
+  expected_output: >
+    For each prioritized company, create one H1 section:
+    # Company Name
+
+    The H1 must use the exact company_name string from website_audit_task.
+    Do not shorten it. Do not translate it. Do not add or remove parenthetical text.
+
+    Inside each section, use this exact structure:
+    ## Market Snapshot
+    - country_context: ...
+    - buyer_behavior: ...
+    - visible_opportunity: ...
+    - why_now: ...
+
+    ## Competitor Table
+    A markdown table with these columns:
+    competitor_name | website_quality | key_offer | trust_signals |
+    acquisition_motion | strengths | weaknesses
+
+    ## Strengths To Amplify
+    2-4 bullets about the target company's hidden strengths or angles worth
+    emphasizing online.
+
+    ## Proposal Angles
+    2-4 bullets explaining what the sales proposal should push hard.
+
+    ## Caution Points
+    2-4 bullets explaining what to avoid, over-claim, or frame carefully in
+    this market.
+  agent: competitor_analyst
+  context:
+    - website_audit_task
+
+landing_page_task:
+  description: >
+    Build a web narrative blueprint for each prioritized company. This is not a
+    full website build. It is the message architecture that Onecation would use
+    if the prospect accepts the project.
+
+    Tie the narrative to the website bucket and recommended offer type. The
+    message should reflect the company's actual strengths, market opportunity,
+    and trust gap. Use the target country context when proposing proof blocks,
+    CTAs, and page structure.
+  expected_output: >
+    For each prioritized company, create one H1 section:
+    # Company Name
+
+    The H1 must use the exact company_name string from website_audit_task.
+    Do not shorten it. Do not translate it. Do not add or remove parenthetical text.
+
+    Inside each section, use this structure:
+    ## Core Promise
+    - primary_headline: ...
+    - supporting_promise: ...
+    - primary_cta: ...
+
+    ## Trust Blocks
+    - trust_block_1: ...
+    - trust_block_2: ...
+    - proof_to_collect: ...
+
+    ## Page Priorities
+    A markdown table with these columns:
+    page_or_block | purpose | key_message | conversion_role
+
+    ## Conversion Notes
+    2-4 bullets on what must happen for the site to convert better.
+  agent: landing_page_builder
+  context:
+    - website_audit_task
+    - competitor_analysis_task
+
+marketing_recommendation_task:
+  description: >
+    Recommend the highest-leverage commercial actions for each prioritized
+    company. Do not default to weekly social posting. You may recommend digital
+    or non-digital motions, including:
+    website relaunch, website maintenance, SEO, Google Ads, Meta ads, LinkedIn,
+    cold email, local directories, partnership outreach, trade associations,
+    offline sales activity, content, or other country-appropriate channels.
+
+    Your output must answer:
+    - What should happen first?
+    - What should support it?
+    - What should be avoided for now?
+    - What could become a monthly retainer?
+
+    Tie the answer to the target country, the website bucket, and the realistic
+    buying behavior of that market.
+  expected_output: >
+    For each prioritized company, create one H1 section:
+    # Company Name
+
+    The H1 must use the exact company_name string from website_audit_task.
+    Do not shorten it. Do not translate it. Do not add or remove parenthetical text.
+
+    Inside each section, use this structure:
+    ## Recommended Offer
+    A markdown table with these columns:
+    offer_type | what_is_included | why_this_offer | setup_budget_range | monthly_budget_range
+
+    ## Go-To-Market Priorities
+    A markdown table with these columns:
+    priority | motion | why_this_company | first_30_days | target_kpi
+
+    ## Retainer Opportunities
+    2-4 bullets describing what ongoing work Onecation could manage after the
+    initial project, if relevant.
+
+    ## What Not To Do First
+    2-4 bullets describing low-priority or premature actions.
+  agent: marketing_strategist
+  context:
+    - website_audit_task
+    - competitor_analysis_task
+    - landing_page_task
+
+proposal_task:
+  description: >
+    Write a client-facing proposal in {proposal_language} for each prioritized
+    company. This proposal is intended to be strong enough for the first outbound
+    touch. It should feel like it was written by a senior salesperson and
+    strategist who studied the company, the market, and the opportunity.
+
+    Use {currency} for pricing guidance.
+    The proposal must be polite, specific, and commercially sharp. Include a
+    short greeting near the front and a short thank-you closing at the end.
+    When writing in English, prefer plain ASCII punctuation instead of smart
+    quotes or typographic apostrophes.
+
+    This is not a generic marketing report. It must:
+    - identify the company's current digital state
+    - explain why that state matters commercially
+    - show relevant market and competitor context
+    - surface hidden strengths this company should amplify
+    - recommend a clear project direction
+    - recommend a practical execution plan
+    - present a tailored package and price guidance
+
+    Always adapt to the website bucket:
+    - outdated_website -> relaunch logic
+    - inconsistent_website -> maintenance recovery logic
+    - no_website -> new presence logic
+
+    Your execution plan may include website work, maintenance, cold email,
+    partnerships, search, paid media, local directories, offline activity,
+    content, or a combination. Do not force the same channels on every company.
+
+    If reliable data is missing, say so clearly instead of inventing certainty.
+  expected_output: >
+    For each prioritized company, create one H1 section:
+    # Company Name
+
+    The H1 must use the exact company_name string from website_audit_task.
+    Do not shorten it. Do not translate it. Do not add or remove parenthetical text.
+
+    Inside each section, use this exact structure:
+    ## Greeting
+    A short, polite opening that says this proposal was prepared after reviewing
+    the company's current digital presence and market context.
+
+    ## Executive Summary
+    1 short paragraph plus 3-5 bullets covering:
+    current situation, biggest risk, biggest opportunity, and recommended start.
+
+    ## What We Found
+    3-5 bullets describing the current website/digital condition with evidence.
+
+    ## Why This Matters
+    1-2 short paragraphs explaining the commercial impact if nothing changes.
+
+    ## Market And Competitor Snapshot
+    Include:
+    - a short market summary
+    - a markdown competitor table copied or adapted from upstream research
+    - 2-4 bullets on what competitors appear to be doing better or differently
+
+    ## Your Hidden Strengths
+    2-4 bullets on what this company can uniquely amplify.
+
+    ## Recommended Direction
+    1 short paragraph naming the recommended offer direction and why it fits.
+
+    ## 30-60-90 Day Execution Plan
+    A markdown table with these columns:
+    phase | what_we_do | expected_business_effect
+
+    ## Recommended Packages
+    A markdown table with these columns:
+    package_name | best_for | what_is_included | price_range | notes
+
+    Include:
+    - one recommended package
+    - one alternative package
+    - one optional ongoing retainer
+
+    ## Pricing Guidance
+    1 short paragraph explaining the pricing logic in plain business language.
+
+    ## Why Onecation
+    1 short paragraph plus 3-5 bullets on cross-border fit, execution strength,
+    and relevant proof.
+
+    ## Suggested Next Step
+    A concise numbered list with at most 3 steps.
+
+    ## Closing
+    A short, polite thank-you note that invites a reply.
+  agent: proposal_writer
+  context:
+    - website_audit_task
+    - competitor_analysis_task
+    - landing_page_task
+    - marketing_recommendation_task
+
+email_outreach_task:
+  description: >
+    Write outbound emails in {proposal_language} for each prioritized company.
+    Assume the full proposal document and PDF are attached in the first touch.
+    The first email should feel researched and substantial, not teaser-only.
+
+    Every company's sequence must include:
+    - one primary outbound email (day 1) that references the attached proposal
+    - one follow-up email (day 5-7)
+    - one final follow-up email (day 10-14)
+
+    Requirements:
+    - Mention one company-specific observation.
+    - Mention one market or competitor insight.
+    - State one concrete way Onecation would help.
+    - Use one clear CTA only.
+    - Keep the tone respectful and professional.
+    - Avoid generic praise and template filler.
+    - When writing in English, prefer plain ASCII punctuation instead of smart
+      quotes or typographic apostrophes.
+
+    The first email should make it clear that real work was already done:
+    review, diagnosis, competitor context, and tailored execution ideas.
+  expected_output: >
+    For each prioritized company, create one H1 section:
+    # Company Name
+
+    The H1 must use the exact company_name string from website_audit_task.
+    Do not shorten it. Do not translate it. Do not add or remove parenthetical text.
+
+    Inside each section, use this exact structure:
+    ## Primary Outbound Email
+    - subject: ...
+    - preview_line: ...
+    - body:
+      A ready-to-send email body.
+    - cta: ...
+
+    ## Follow Up 1
+    - subject: ...
+    - body:
+      A ready-to-send follow-up email body.
+    - cta: ...
+
+    ## Follow Up 2
+    - subject: ...
+    - body:
+      A ready-to-send final follow-up email body.
+    - cta: ...
+
+    Also include:
+    ## Personalization Notes
+    2-4 bullets on which facts were used to tailor the sequence.
+  agent: email_writer
+  context:
+    - proposal_task
+    - competitor_analysis_task
+    - marketing_recommendation_task
+
+notion_logging_task:
+  description: >
+    Log one CRM row or page per company only when CRM sync is enabled and the
+    field mapping is confirmed. Until then, produce a structured fallback summary
+    that can be mapped later without losing context.
+  expected_output: >
+    First line must be exactly: TOTAL_COMPANIES: N
+
+    Then output one markdown table with these columns:
+    company_name | crm_logged | page_id_or_reason | website_bucket |
+    recommended_offer_type | target_country | next_step | proposal_ready | email_ready
+  agent: notion_logger
+  context:
+    - lead_research_task
+    - website_audit_task
+    - marketing_recommendation_task
+    - proposal_task
+    - email_outreach_task

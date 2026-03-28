@@ -1,0 +1,32 @@
+[project]
+name = "sales_factory"
+version = "0.1.0"
+description = "sales_factory using crewAI"
+authors = [{ name = "Your Name", email = "you@example.com" }]
+requires-python = ">=3.10,<3.14"
+dependencies = [
+    "crewai[google-genai,tools]==1.9.3",
+    "reportlab>=4.0",
+    "playwright>=1.40.0",
+    "requests>=2.28.0",
+    "supabase>=2.28.3",
+    "python-dotenv>=1.1.1",
+]
+
+[project.optional-dependencies]
+web = ["streamlit>=1.28.0"]
+
+[project.scripts]
+sales_factory = "sales_factory.main:run"
+run_crew = "sales_factory.main:run"
+train = "sales_factory.main:train"
+replay = "sales_factory.main:replay"
+test = "sales_factory.main:test"
+run_with_trigger = "sales_factory.main:run_with_trigger"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.crewai]
+type = "crew"
