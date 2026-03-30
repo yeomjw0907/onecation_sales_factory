@@ -25,6 +25,9 @@ class ManagedRunRetryTests(unittest.TestCase):
             currency="KRW",
             notify_email="ops@onecation.co.kr",
             test_mode=True,
+            segment_id="korea-entry-overseas",
+            segment_label="한국 시장 진입형 해외 기업",
+            segment_brief="Only target overseas companies entering Korea.",
         )
 
         with patch.dict("os.environ", {"SALES_FACTORY_SENDER_NAME": "Minjun Kim"}, clear=False), patch(
@@ -35,6 +38,9 @@ class ManagedRunRetryTests(unittest.TestCase):
 
         self.assertEqual(inputs["sender_name"], "Minjun Kim")
         self.assertEqual(inputs["onecation_proof_points"], "Approved proof only.")
+        self.assertEqual(inputs["segment_id"], "korea-entry-overseas")
+        self.assertEqual(inputs["segment_label"], "한국 시장 진입형 해외 기업")
+        self.assertEqual(inputs["segment_brief"], "Only target overseas companies entering Korea.")
 
     def test_is_retryable_llm_error_detects_transient_503(self) -> None:
         self.assertTrue(is_retryable_llm_error(RuntimeError("503 Service Unavailable: model is overloaded")))

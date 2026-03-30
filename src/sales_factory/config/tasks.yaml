@@ -4,6 +4,8 @@ lead_research_task:
     Proposal language: {proposal_language}
     User query: {lead_query}
     Lead mode: {lead_mode}
+    Active segment: {segment_label}
+    Segment brief: {segment_brief}
 
     If lead_mode is "company_name", treat lead_query as one exact company and
     search for exact legal-name matches first. If multiple companies share that
@@ -14,6 +16,9 @@ lead_research_task:
     If the exact company cannot be verified, return zero rows.
     If lead_mode is "region_or_industry", find up to {max_companies} companies
     that match the requested market.
+    If segment_label is provided, only keep companies that clearly match the
+    active segment's buyer, offer fit, and business model. A company matching
+    the geography but not the segment should be deprioritized or excluded.
 
     For each company, collect:
     company_name, industry, location, contact_email_or_phone, homepage_url_if_any,

@@ -274,6 +274,9 @@ def build_inputs(args: argparse.Namespace) -> dict[str, Any]:
         "proposal_language": args.proposal_language,
         "currency": args.currency,
         "onecation_proof_points": load_onecation_proof_points(),
+        "segment_id": getattr(args, "segment_id", "") or "",
+        "segment_label": getattr(args, "segment_label", "") or "",
+        "segment_brief": getattr(args, "segment_brief", "") or "",
         "alert_email_to": args.notify_email,
         "test_mode": args.test_mode,
         "auto_mode": strategy_snapshot["auto_mode"],
@@ -864,6 +867,9 @@ def run_managed(args: argparse.Namespace) -> str:
                 "notify_email": args.notify_email,
                 "auto_mode": inputs.get("auto_mode", False),
                 "strategy_snapshot": inputs.get("strategy_snapshot", {}),
+                "segment_id": inputs.get("segment_id", ""),
+                "segment_label": inputs.get("segment_label", ""),
+                "log_path": getattr(args, "log_path", "") or "",
                 "workspace_dir": str(workspace_dir),
                 "output_dir": str(output_dir),
             },
@@ -1160,6 +1166,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--target-country", default="US")
     parser.add_argument("--proposal-language", default="en")
     parser.add_argument("--currency", default="USD")
+    parser.add_argument("--segment-id", default="")
+    parser.add_argument("--segment-label", default="")
+    parser.add_argument("--segment-brief", default="")
+    parser.add_argument("--log-path", default="")
     parser.add_argument("--notify-email", default="")
     parser.add_argument("--test-mode", action="store_true", default=False)
     return parser

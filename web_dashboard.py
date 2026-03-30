@@ -9,7 +9,7 @@ import threading
 import time
 import traceback
 from types import SimpleNamespace
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +28,16 @@ from sales_factory.proposal_quality import evaluate_proposal_path, evaluate_prop
 from sales_factory.auto_delivery import build_primary_email_payload, get_auto_send_settings
 from sales_factory.runtime_assets import route_rejection
 from sales_factory.runtime_copilot import answer_ops_question
+from sales_factory.segment_calendar import (
+    add_segment_calendar_entry,
+    create_segment_calendar_entry,
+    delete_segment_calendar_entry,
+    get_segment_preset,
+    list_segment_calendar_entries_for_date,
+    list_segment_presets,
+    list_upcoming_segment_calendar_entries,
+    mark_segment_calendar_entry_launched,
+)
 from sales_factory.slack_review import prime_slack_review_handlers
 from sales_factory.runtime_db import (
     DB_PATH,
@@ -107,6 +117,23 @@ COUNTRY_DEFAULTS = {
 }
 ALERT_EMAIL_DEFAULT = os.environ.get("ALERT_EMAIL_TO", "")
 KOREAN_WEEKDAYS = ["월", "화", "수", "목", "금", "토", "일"]
+PIPELINE_LOG_DIR = PROJECT_ROOT / ".runtime" / "logs"
+PIPELINE_BASELINE_PATH = PROJECT_ROOT / ".runtime" / "pipeline_baselines.json"
+DEFAULT_PIPELINE_BASELINES_MINUTES = {
+    "lead_research_task": 6,
+    "identity_disambiguation_task": 4,
+    "lead_verification_task": 4,
+    "website_audit_task": 6,
+    "competitor_analysis_task": 7,
+    "landing_page_task": 5,
+    "marketing_recommendation_task": 5,
+    "proposal_task": 8,
+    "proposal_localization_task": 5,
+    "email_outreach_task": 4,
+    "email_localization_task": 4,
+    "notion_logging_task": 2,
+    "review_station": 8,
+}
 
 LEAD_MODE_LABELS = {
     "region_or_industry": "지역 / 업종 기준",
@@ -477,6 +504,32 @@ def format_local_datetime(value: str | None) -> str:
         return value[:16] if value else "-"
 
 
+def parse_iso_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def format_duration_compact(seconds: float | int | None) -> str:
+    if seconds is None:
+        return "-"
+    total_seconds = max(0, int(round(float(seconds))))
+    if total_seconds < 60:
+        return f"{total_seconds}초"
+    minutes, remaining_seconds = divmod(total_seconds, 60)
+    hours, remaining_minutes = divmod(minutes, 60)
+    if hours:
+        if remaining_minutes:
+            return f"{hours}시간 {remaining_minutes}분"
+        return f"{hours}시간"
+    if remaining_seconds and minutes < 10:
+        return f"{minutes}분 {remaining_seconds}초"
+    return f"{minutes}분"
+
+
 def filter_rows_by_date(rows: list[dict[str, Any]], field: str, selected_date: date | None) -> list[dict[str, Any]]:
     if not selected_date:
         return rows
@@ -531,6 +584,105 @@ def list_notifications(limit: int = 20) -> list[dict[str, Any]]:
     return db_list_notifications(limit=limit)
 
 
+def load_pipeline_baselines() -> dict[str, int]:
+    baselines = dict(DEFAULT_PIPELINE_BASELINES_MINUTES)
+    if not PIPELINE_BASELINE_PATH.exists():
+        return baselines
+    try:
+        payload = json.loads(PIPELINE_BASELINE_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return baselines
+    if not isinstance(payload, dict):
+        return baselines
+    for key, value in payload.items():
+        try:
+            minutes = int(value)
+        except (TypeError, ValueError):
+            continue
+        if minutes > 0:
+            baselines[str(key)] = minutes
+    return baselines
+
+
+def save_pipeline_baselines(baselines: dict[str, int]) -> None:
+    PIPELINE_BASELINE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    ordered = {key: int(baselines[key]) for key in DEFAULT_PIPELINE_BASELINES_MINUTES}
+    PIPELINE_BASELINE_PATH.write_text(json.dumps(ordered, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def list_recent_runtime_logs(limit: int = 20) -> list[Path]:
+    if not PIPELINE_LOG_DIR.exists():
+        return []
+    return sorted(PIPELINE_LOG_DIR.glob("dashboard-run-*.log"), key=lambda path: path.stat().st_mtime, reverse=True)[:limit]
+
+
+def resolve_run_log_path(run_row: dict[str, Any] | None) -> Path | None:
+    if not run_row:
+        return None
+    metadata = parse_json_field(run_row.get("metadata_json"), {})
+    raw_path = str(metadata.get("log_path") or "").strip()
+    if raw_path:
+        path = Path(raw_path)
+        if path.exists():
+            return path
+    recent_logs = list_recent_runtime_logs(limit=1)
+    return recent_logs[0] if recent_logs else None
+
+
+def read_log_tail(log_path: Path, *, max_chars: int = 12000) -> str:
+    content = log_path.read_text(encoding="utf-8", errors="replace")
+    return content[-max_chars:] if len(content) > max_chars else content
+
+
+def render_run_log_panel(run_row: dict[str, Any] | None, *, key_prefix: str) -> None:
+    st.markdown("**실행 로그**")
+    if not run_row:
+        st.info("연결된 실행이 없습니다.")
+        return
+
+    recent_logs = list_recent_runtime_logs(limit=10)
+    linked_log = resolve_run_log_path(run_row)
+    options: list[Path] = []
+    if linked_log:
+        options.append(linked_log)
+    for candidate in recent_logs:
+        if candidate not in options:
+            options.append(candidate)
+
+    if not options:
+        st.info("표시할 로그 파일이 없습니다.")
+        return
+
+    default_index = 0
+    selected_log_name = st.selectbox(
+        "로그 파일",
+        options=[path.name for path in options],
+        index=default_index,
+        key=f"{key_prefix}_log_file",
+    )
+    selected_log = next((path for path in options if path.name == selected_log_name), options[0])
+    max_chars = st.select_slider(
+        "표시 범위",
+        options=[4000, 8000, 12000, 20000],
+        value=12000,
+        key=f"{key_prefix}_log_chars",
+        format_func=lambda value: f"최근 {value:,}자",
+    )
+
+    try:
+        content = read_log_tail(selected_log, max_chars=max_chars)
+    except Exception as exc:
+        st.warning(f"로그 읽기 실패: {exc}")
+        return
+
+    log_stat = selected_log.stat()
+    c1, c2, c3 = st.columns([2.8, 1.1, 1.2])
+    c1.caption(f"경로: `{selected_log}`")
+    c2.caption(f"수정: {format_local_datetime(datetime.fromtimestamp(log_stat.st_mtime).isoformat(timespec='seconds'))}")
+    c3.caption(f"크기: {log_stat.st_size:,} bytes")
+    st.code(content or "(비어있음)", language="text")
+
+
 def set_ui_notice(level: str, message: str) -> None:
     st.session_state["ui_notice"] = {"level": level, "message": message}
 
@@ -551,6 +703,145 @@ def render_ui_notice() -> None:
         st.info(message)
 
 
+def inject_app_shell_styles() -> None:
+    st.markdown(
+        """
+        <style>
+        @import url("https://cdn.jsdelivr.net/npm/pretendard/dist/web/static/pretendard.css");
+
+        :root {
+            --sf-bg: #f6f3ee;
+            --sf-panel: rgba(255, 252, 246, 0.94);
+            --sf-panel-strong: #fffdfa;
+            --sf-sidebar: #f1ede6;
+            --sf-border: rgba(15, 23, 42, 0.08);
+            --sf-text: #182132;
+            --sf-muted: #667085;
+            --sf-accent: #dc5b43;
+            --sf-accent-soft: rgba(220, 91, 67, 0.12);
+            --sf-shadow: 0 18px 40px rgba(15, 23, 42, 0.05);
+        }
+
+        html, body, [class*="css"] {
+            font-family: "Pretendard Variable", "Pretendard", "Noto Sans KR", sans-serif;
+            color: var(--sf-text);
+        }
+
+        .stApp {
+            background:
+                radial-gradient(circle at top left, rgba(220, 91, 67, 0.08), transparent 26%),
+                linear-gradient(180deg, #f8f5ef 0%, #fbfaf7 22%, #f6f3ee 100%);
+        }
+
+        [data-testid="stAppViewContainer"] > .main {
+            background: transparent;
+        }
+
+        [data-testid="stSidebar"] {
+            background: linear-gradient(180deg, #f2eee8 0%, #ede9e1 100%);
+            border-right: 1px solid var(--sf-border);
+        }
+
+        [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p {
+            color: var(--sf-text);
+        }
+
+        [data-testid="stSidebar"] .stButton > button {
+            border-radius: 14px;
+            font-weight: 700;
+            min-height: 48px;
+        }
+
+        div[data-testid="stVerticalBlockBorderWrapper"] {
+            border-radius: 20px;
+            border-color: var(--sf-border);
+            background: var(--sf-panel);
+            box-shadow: var(--sf-shadow);
+        }
+
+        div[data-testid="stMetric"] {
+            background: rgba(255, 255, 255, 0.72);
+            border: 1px solid var(--sf-border);
+            border-radius: 18px;
+            padding: 14px 16px;
+            min-height: 112px;
+            box-shadow: 0 10px 24px rgba(15, 23, 42, 0.035);
+        }
+
+        div[data-testid="stMetricLabel"] {
+            color: var(--sf-muted);
+            font-size: 0.82rem;
+        }
+
+        div[data-testid="stMetricValue"] {
+            letter-spacing: -0.03em;
+        }
+
+        .stTabs [data-baseweb="tab-list"] {
+            gap: 20px;
+            border-bottom: 1px solid rgba(15, 23, 42, 0.08);
+            padding-bottom: 0;
+        }
+
+        .stTabs [data-baseweb="tab"] {
+            height: auto;
+            padding: 0 0 14px 0;
+            font-weight: 700;
+            color: var(--sf-muted);
+        }
+
+        .stTabs [aria-selected="true"] {
+            color: var(--sf-accent) !important;
+            border-bottom: 2px solid var(--sf-accent);
+        }
+
+        [data-testid="stExpander"] details {
+            border-radius: 18px;
+            border: 1px solid var(--sf-border);
+            background: rgba(255, 255, 255, 0.72);
+        }
+
+        [data-testid="stExpander"] summary p {
+            font-weight: 700;
+            color: var(--sf-text);
+        }
+
+        h1, h2, h3 {
+            letter-spacing: -0.035em;
+            color: var(--sf-text);
+        }
+
+        h1 {
+            font-size: clamp(2.4rem, 4vw, 3.4rem);
+            margin-bottom: 0.2rem;
+        }
+
+        h3 {
+            font-size: 2rem;
+            margin-top: 0.5rem;
+        }
+
+        code {
+            color: #0f766e;
+            background: rgba(15, 118, 110, 0.08);
+            padding: 0.15rem 0.4rem;
+            border-radius: 999px;
+        }
+
+        .stButton > button[kind="primary"] {
+            background: linear-gradient(135deg, #e15b43 0%, #d44b36 100%);
+            border: none;
+        }
+
+        .stButton > button[kind="secondary"] {
+            background: rgba(255, 255, 255, 0.72);
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def launch_background_run(
     *,
     target_country: str,
@@ -560,6 +851,9 @@ def launch_background_run(
     notify_email: str,
     test_mode: bool,
     trigger_source: str = "dashboard",
+    segment_id: str = "",
+    segment_label: str = "",
+    segment_brief: str = "",
 ) -> None:
     defaults = COUNTRY_DEFAULTS[target_country]
     log_dir = PROJECT_ROOT / ".runtime" / "logs"
@@ -585,7 +879,15 @@ def launch_background_run(
         defaults["proposal_language"],
         "--currency",
         defaults["currency"],
+        "--log-path",
+        str(log_path),
     ]
+    if segment_id:
+        args.extend(["--segment-id", segment_id])
+    if segment_label:
+        args.extend(["--segment-label", segment_label])
+    if segment_brief:
+        args.extend(["--segment-brief", segment_brief])
     if test_mode:
         args.append("--test-mode")
 
@@ -601,6 +903,10 @@ def launch_background_run(
             notify_email=notify_email,
             proposal_language=defaults["proposal_language"],
             currency=defaults["currency"],
+            segment_id=segment_id,
+            segment_label=segment_label,
+            segment_brief=segment_brief,
+            log_path=str(log_path),
             test_mode=test_mode,
         )
 
@@ -847,6 +1153,381 @@ def send_test_outbound_email(
     )
 
 
+def build_pipeline_stages(tasks: list[dict[str, Any]], latest_run: dict[str, Any]) -> list[dict[str, Any]]:
+    stages: list[dict[str, Any]] = []
+
+    for index, row in enumerate(tasks, start=1):
+        config = DEPARTMENT_CONFIG.get(
+            row.get("task_name") or "",
+            {"department": display_task_name(row.get("task_name")), "summary": "", "support": []},
+        )
+        members = get_department_members(row.get("task_name"))
+        primary_member = members[0] if members else {"name": "-", "role": "-"}
+        member_count = len(members)
+        owner_label = primary_member["name"]
+        if member_count > 1:
+            owner_label = f"{primary_member['name']} 외 {member_count - 1}명"
+
+        status = str(row.get("status") or "pending")
+        if status == "running":
+            note = f"지금 작업 중 · 토큰 {int(row.get('total_tokens', 0) or 0):,}"
+        elif status == "completed":
+            note = "이 단계 완료"
+        elif status == "failed":
+            note = latest_run.get("error_message") or "이 단계에서 멈춤"
+        elif status == "waiting_approval":
+            note = "산출물 검토 대기"
+        else:
+            note = "이전 단계 완료 후 시작"
+
+        stages.append(
+            {
+                "kind": "task",
+                "task_name": row.get("task_name") or "",
+                "index_label": f"{index:02d}",
+                "department": config["department"],
+                "task_label": display_task_name(row.get("task_name")),
+                "owner_label": owner_label,
+                "owner_role": primary_member.get("role", "-"),
+                "summary": config.get("summary") or "",
+                "support": config.get("support", []),
+                "status": status,
+                "status_label": display_status(status),
+                "note": note,
+                "started_at": row.get("started_at"),
+                "finished_at": row.get("finished_at"),
+            }
+        )
+
+    waiting_items = [item for item in list_approval_items("waiting_approval") if item.get("run_id") == latest_run.get("id")]
+    run_status = str(latest_run.get("status") or "")
+    should_include_review = bool(tasks) or bool(waiting_items) or run_status in {
+        "waiting_approval",
+        "rejected",
+        "approved",
+        "auto_sent",
+        "completed",
+        "failed",
+    }
+
+    if should_include_review:
+        if run_status in {"approved", "auto_sent", "completed"}:
+            review_status = "completed"
+        elif run_status in {"waiting_approval", "rejected"} or waiting_items:
+            review_status = "waiting_approval"
+        elif run_status == "failed" and not any(stage["status"] == "failed" for stage in stages):
+            review_status = "failed"
+        else:
+            review_status = "pending"
+
+        if review_status == "completed":
+            review_note = "검토 및 발송 판단 완료"
+        elif review_status == "waiting_approval":
+            review_note = f"검토 대기 {len(waiting_items)}건"
+        elif review_status == "failed":
+            review_note = latest_run.get("error_message") or "검토 단계에서 멈춤"
+        else:
+            review_note = "산출물 생성 후 최종 검토"
+
+        stages.append(
+            {
+                "kind": "review",
+                "task_name": "review_station",
+                "index_label": "검토",
+                "department": "검토 운영본부",
+                "task_label": "승인 판단 / 재작업 조정",
+                "owner_label": "오세훈 과장 외 1명",
+                "owner_role": "승인 판단팀",
+                "summary": "승인이 필요한 산출물을 확인하고, 필요하면 재작업 방향을 바로 지시합니다.",
+                "support": ["승인 판단팀", "재작업 조정팀"],
+                "status": review_status,
+                "status_label": display_status(review_status),
+                "note": review_note,
+                "started_at": min((item.get("created_at") for item in waiting_items if item.get("created_at")), default=""),
+                "finished_at": latest_run.get("finished_at") if review_status == "completed" else "",
+            }
+        )
+
+    return stages
+
+
+def build_pipeline_timing_summary(
+    stages: list[dict[str, Any]],
+    latest_run: dict[str, Any],
+    *,
+    reference_time: datetime | None = None,
+    baselines: dict[str, int] | None = None,
+) -> dict[str, Any]:
+    now_dt = reference_time or datetime.now()
+    configured_baselines = baselines or load_pipeline_baselines()
+
+    def duration_seconds_for(stage: dict[str, Any]) -> int | None:
+        started_at = parse_iso_datetime(stage.get("started_at"))
+        finished_at = parse_iso_datetime(stage.get("finished_at"))
+        if started_at and finished_at:
+            return max(0, int((finished_at - started_at).total_seconds()))
+        if started_at and stage.get("status") in {"running", "waiting_approval", "failed"}:
+            return max(0, int((now_dt - started_at).total_seconds()))
+        return None
+
+    def baseline_seconds_for(stage: dict[str, Any]) -> int:
+        key = str(stage.get("task_name") or "review_station")
+        minutes = int(configured_baselines.get(key) or DEFAULT_PIPELINE_BASELINES_MINUTES.get(key) or 5)
+        return max(1, minutes) * 60
+
+    completed_durations = [
+        duration
+        for stage in stages
+        if stage.get("status") == "completed"
+        for duration in [duration_seconds_for(stage)]
+        if duration is not None
+    ]
+    average_stage_seconds = int(sum(completed_durations) / len(completed_durations)) if completed_durations else 300
+
+    for stage in stages:
+        duration_seconds = duration_seconds_for(stage)
+        baseline_seconds = baseline_seconds_for(stage)
+        stage["baseline_seconds"] = baseline_seconds
+        stage["duration_seconds"] = duration_seconds
+        if duration_seconds is None:
+            stage["duration_label"] = f"예상 {format_duration_compact(baseline_seconds)}"
+        elif stage.get("status") == "completed":
+            stage["duration_label"] = (
+                f"소요 {format_duration_compact(duration_seconds)} · 기준 {format_duration_compact(baseline_seconds)}"
+            )
+        elif stage.get("status") in {"running", "waiting_approval"}:
+            stage["duration_label"] = (
+                f"체류 {format_duration_compact(duration_seconds)} · 기준 {format_duration_compact(baseline_seconds)}"
+            )
+        elif stage.get("status") == "failed":
+            stage["duration_label"] = (
+                f"멈춘 시점 {format_duration_compact(duration_seconds)} · 기준 {format_duration_compact(baseline_seconds)}"
+            )
+        else:
+            stage["duration_label"] = "대기 중"
+
+    started_at = parse_iso_datetime(latest_run.get("started_at"))
+    finished_at = parse_iso_datetime(latest_run.get("finished_at"))
+    if started_at:
+        total_elapsed_seconds = int(((finished_at or now_dt) - started_at).total_seconds())
+    else:
+        total_elapsed_seconds = sum(duration for duration in completed_durations if duration is not None)
+
+    run_status = str(latest_run.get("status") or "")
+    if run_status in {"completed", "approved", "auto_sent"}:
+        eta_label = "완료"
+        estimated_finish_label = format_local_datetime(latest_run.get("finished_at"))
+    elif run_status == "failed":
+        eta_label = "중단됨"
+        estimated_finish_label = "-"
+    else:
+        remaining_seconds = 0
+        for stage in stages:
+            stage_status = str(stage.get("status") or "pending")
+            baseline_seconds = int(stage.get("baseline_seconds") or baseline_seconds_for(stage))
+            if stage_status == "pending":
+                remaining_seconds += baseline_seconds
+                continue
+            if stage_status in {"running", "waiting_approval"}:
+                elapsed = int(stage.get("duration_seconds") or 0)
+                target_seconds = max(60, baseline_seconds)
+                remaining_seconds += max(60, target_seconds - elapsed)
+
+        if remaining_seconds <= 0:
+            eta_label = "곧 완료"
+            estimated_finish_label = format_local_datetime(now_dt.isoformat(timespec="seconds"))
+        else:
+            estimated_finish = now_dt + timedelta(seconds=remaining_seconds)
+            eta_label = format_duration_compact(remaining_seconds)
+            estimated_finish_label = format_local_datetime(estimated_finish.isoformat(timespec="seconds"))
+
+    return {
+        "elapsed_label": format_duration_compact(total_elapsed_seconds),
+        "eta_label": eta_label,
+        "estimated_finish_label": estimated_finish_label,
+        "average_stage_label": format_duration_compact(average_stage_seconds),
+        "baseline_source": configured_baselines,
+    }
+
+
+def summarize_pipeline_progress(stages: list[dict[str, Any]]) -> dict[str, Any]:
+    if not stages:
+        return {
+            "current_stage": None,
+            "started_count": 0,
+            "completed_count": 0,
+            "total_count": 0,
+            "progress_percent": 0,
+        }
+
+    active_stage = next((stage for stage in stages if stage["status"] in {"running", "waiting_approval", "failed"}), None)
+    if active_stage is None:
+        active_stage = next((stage for stage in stages if stage["status"] == "pending"), None) or stages[-1]
+
+    started_count = sum(1 for stage in stages if stage["status"] in {"completed", "running", "waiting_approval", "failed"})
+    completed_count = sum(1 for stage in stages if stage["status"] == "completed")
+    progress_percent = int(round((started_count / len(stages)) * 100))
+
+    return {
+        "current_stage": active_stage,
+        "started_count": started_count,
+        "completed_count": completed_count,
+        "total_count": len(stages),
+        "progress_percent": progress_percent,
+    }
+
+
+def render_pipeline_timeline(tasks: list[dict[str, Any]], latest_run: dict[str, Any]) -> None:
+    stages = build_pipeline_stages(tasks, latest_run)
+    if not stages:
+        return
+
+    inputs = parse_json_field(latest_run.get("inputs_json"), {})
+    progress = summarize_pipeline_progress(stages)
+    timing = build_pipeline_timing_summary(stages, latest_run)
+    current_stage = progress["current_stage"] or {}
+
+    status_styles = {
+        "completed": {
+            "card_bg": "linear-gradient(180deg, rgba(16,43,37,0.98) 0%, rgba(11,31,27,0.98) 100%)",
+            "border": "#34d399",
+            "dot": "#34d399",
+            "chip_bg": "#dcfce7",
+            "chip_text": "#166534",
+            "connector": "#34d399",
+            "shadow": "0 0 0 5px rgba(52,211,153,0.18)",
+        },
+        "running": {
+            "card_bg": "linear-gradient(180deg, rgba(16,35,61,0.98) 0%, rgba(10,24,44,0.98) 100%)",
+            "border": "#60a5fa",
+            "dot": "#60a5fa",
+            "chip_bg": "#dbeafe",
+            "chip_text": "#1d4ed8",
+            "connector": "#60a5fa",
+            "shadow": "0 0 0 6px rgba(96,165,250,0.24)",
+        },
+        "waiting_approval": {
+            "card_bg": "linear-gradient(180deg, rgba(48,37,16,0.98) 0%, rgba(36,28,11,0.98) 100%)",
+            "border": "#facc15",
+            "dot": "#facc15",
+            "chip_bg": "#fef3c7",
+            "chip_text": "#92400e",
+            "connector": "#facc15",
+            "shadow": "0 0 0 6px rgba(250,204,21,0.2)",
+        },
+        "failed": {
+            "card_bg": "linear-gradient(180deg, rgba(50,22,26,0.98) 0%, rgba(37,16,19,0.98) 100%)",
+            "border": "#f87171",
+            "dot": "#f87171",
+            "chip_bg": "#fee2e2",
+            "chip_text": "#b91c1c",
+            "connector": "#f87171",
+            "shadow": "0 0 0 6px rgba(248,113,113,0.18)",
+        },
+        "pending": {
+            "card_bg": "linear-gradient(180deg, rgba(28,35,48,0.98) 0%, rgba(20,25,36,0.98) 100%)",
+            "border": "#64748b",
+            "dot": "#94a3b8",
+            "chip_bg": "#e2e8f0",
+            "chip_text": "#334155",
+            "connector": "rgba(148,163,184,0.35)",
+            "shadow": "none",
+        },
+    }
+
+    def style_for(status: str | None) -> dict[str, str]:
+        return status_styles.get(status or "pending", status_styles["pending"])
+
+    def status_chip(label: str, status: str | None) -> str:
+        style = style_for(status)
+        return (
+            f"<span style='display:inline-flex;align-items:center;padding:4px 10px;border-radius:999px;"
+            f"background:{style['chip_bg']};color:{style['chip_text']};font-size:12px;font-weight:800;'>"
+            f"{html.escape(label)}</span>"
+        )
+
+    current_department = current_stage.get("department") or "-"
+    current_task = current_stage.get("task_label") or "-"
+    current_owner = current_stage.get("owner_label") or "-"
+    segment_label = inputs.get("segment_label") or "수동/일반 실행"
+    st.markdown("**실행 노선도**")
+    st.caption("각 역은 사업부 단위입니다. 현재 파란/노란/빨간 역이 지금 멈춰 있는 위치이고, 오른쪽으로 갈수록 다음 단계입니다.")
+    st.progress(
+        min(1.0, max(0.0, float(progress["progress_percent"]) / 100.0)),
+        text=(
+            f"현재 위치: {current_department} · {current_task} · 담당 {current_owner} | "
+            f"진행 {progress['started_count']}/{progress['total_count']} 단계"
+        ),
+    )
+    info_columns = st.columns([2.2, 1.1, 1.1, 1.1])
+    info_columns[0].metric("현재 세그먼트", str(segment_label))
+    info_columns[1].metric("누적 체류", timing["elapsed_label"])
+    info_columns[2].metric("남은 시간", timing["eta_label"])
+    info_columns[3].metric("예상 종료", timing["estimated_finish_label"])
+    st.caption(f"완료된 단계 평균 소요시간: {timing['average_stage_label']}")
+
+    stage_blocks: list[str] = []
+    for index, stage in enumerate(stages):
+        style = style_for(stage.get("status"))
+        support_html = ""
+        if stage.get("support"):
+            support_html = (
+                "<div style='margin-top:10px;display:flex;flex-wrap:wrap;gap:6px;'>"
+                + "".join(
+                    f"<span style='display:inline-flex;align-items:center;padding:4px 8px;border-radius:999px;"
+                    f"background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.08);"
+                    f"font-size:11px;font-weight:700;'>{html.escape(item)}</span>"
+                    for item in stage["support"]
+                )
+                + "</div>"
+            )
+
+        connector_html = ""
+        if index < len(stages) - 1:
+            connector_color = style["connector"] if stage.get("status") in {"completed", "running", "waiting_approval", "failed"} else "rgba(148,163,184,0.28)"
+            connector_html = (
+                f"<div style='width:72px;min-width:72px;height:4px;border-radius:999px;background:{connector_color};"
+                "margin:34px 0 0 14px;opacity:0.95;'></div>"
+            )
+
+        stage_blocks.append(
+            f"""
+            <div style="display:flex;align-items:flex-start;min-width:320px;flex:0 0 320px;">
+                <div style="display:flex;flex-direction:column;align-items:center;padding-top:24px;">
+                    <div style="width:18px;height:18px;border-radius:999px;background:{style['dot']};
+                    box-shadow:{style['shadow']};border:2px solid rgba(255,255,255,0.16);"></div>
+                    <div style="margin-top:8px;font-size:11px;font-weight:800;letter-spacing:0.04em;opacity:0.62;">
+                        {html.escape(stage.get('index_label', str(index + 1)))}
+                    </div>
+                </div>
+                <div style="margin-left:12px;flex:1;background:{style['card_bg']};border:1px solid {style['border']};
+                border-radius:18px;padding:16px 16px 14px;min-height:188px;">
+                    <div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start;">
+                        <div style="font-size:11px;font-weight:800;letter-spacing:0.05em;text-transform:uppercase;
+                        color:{style['border']};opacity:0.98;">{html.escape(stage['department'])}</div>
+                        {status_chip(stage['status_label'], stage.get('status'))}
+                    </div>
+                    <div style="font-size:20px;font-weight:800;line-height:1.24;margin:8px 0 10px 0;">{html.escape(stage['task_label'])}</div>
+                    <div style="font-size:13px;font-weight:700;opacity:0.9;">담당 {html.escape(stage['owner_label'])}</div>
+                    <div style="font-size:12px;opacity:0.72;margin-top:4px;line-height:1.55;">{html.escape(stage['summary'])}</div>
+                    <div style="font-size:12px;font-weight:800;opacity:0.95;margin-top:10px;">{html.escape(stage.get('duration_label') or '-')}</div>
+                    <div style="font-size:12px;opacity:0.8;margin-top:10px;line-height:1.55;">{html.escape(stage['note'])}</div>
+                    {support_html}
+                </div>
+                {connector_html}
+            </div>
+            """
+        )
+
+    st.markdown(
+        "<div style='overflow-x:auto;padding:8px 0 14px 0;'>"
+        "<div style='display:flex;align-items:flex-start;min-width:max-content;padding:2px 2px 10px 2px;'>"
+        + "".join(stage_blocks)
+        + "</div></div>",
+        unsafe_allow_html=True,
+    )
+
+
 def render_dashboard(latest_run: dict[str, Any] | None) -> None:
     st.subheader("현재 현황")
 
@@ -895,9 +1576,13 @@ def render_dashboard(latest_run: dict[str, Any] | None) -> None:
 
     tasks = list_tasks(latest_run["id"])
     if not tasks:
+        with st.expander("실제 실행 로그", expanded=str(latest_run.get("status") or "") in {"running", "failed"}):
+            render_run_log_panel(latest_run, key_prefix=f"latest_run_log_{latest_run.get('id', 'latest')}")
         if latest_run.get("status") == "running":
             st.info("파이프라인 시작 중... 첫 번째 에이전트가 준비되면 여기에 표시됩니다.")
         return
+
+    render_pipeline_timeline(tasks, latest_run)
 
     running_tasks = [t for t in tasks if t.get("status") == "running"]
     if running_tasks:
@@ -928,30 +1613,33 @@ def render_dashboard(latest_run: dict[str, Any] | None) -> None:
             unsafe_allow_html=True,
         )
 
-    render_department_board(tasks, latest_run)
+    with st.expander("지금 일하는 부서 전체 보기", expanded=False):
+        render_department_board(tasks, latest_run)
 
-    st.markdown("**작업 진행표**")
-    st.dataframe(
-        [
-                {
-                    "순서": row["task_order"],
-                    "작업": display_task_name(row["task_name"]),
-                    "담당": (
-                        f"{get_department_members(row.get('task_name'))[0]['name']} "
-                        f"({display_task_name(get_department_members(row.get('task_name'))[0]['crew_label'])})"
-                        if get_department_members(row.get("task_name"))
-                        else "-"
-                    ),
-                    "모델": row["model_name"],
-                    "상태": display_status(row["status"]),
-                    "토큰": row["total_tokens"],
-                "비용(USD)": row["estimated_cost_usd"],
-            }
-            for row in tasks
-        ],
-        hide_index=True,
-        use_container_width=True,
-    )
+    with st.expander("작업 진행표", expanded=False):
+        st.dataframe(
+            [
+                    {
+                        "순서": row["task_order"],
+                        "작업": display_task_name(row["task_name"]),
+                        "담당": (
+                            f"{get_department_members(row.get('task_name'))[0]['name']} "
+                            f"({display_task_name(get_department_members(row.get('task_name'))[0]['crew_label'])})"
+                            if get_department_members(row.get("task_name"))
+                            else "-"
+                        ),
+                        "모델": row["model_name"],
+                        "상태": display_status(row["status"]),
+                        "토큰": row["total_tokens"],
+                    "비용(USD)": row["estimated_cost_usd"],
+                }
+                for row in tasks
+            ],
+            hide_index=True,
+            use_container_width=True,
+        )
+    with st.expander("실제 실행 로그", expanded=str(latest_run.get("status") or "") == "running"):
+        render_run_log_panel(latest_run, key_prefix=f"latest_run_log_{latest_run.get('id', 'latest')}")
 
 
 def render_department_board(tasks: list[dict[str, Any]], latest_run: dict[str, Any]) -> None:
@@ -1231,83 +1919,217 @@ def render_strategy_tab(
 ) -> None:
     st.subheader("오늘의 전략")
     today_value = date.today()
-    summary_left, summary_right = st.columns([1.35, 1.0])
-    with summary_left:
+    selected_patterns = preview_strategy.get("selected_patterns", [])
+    latest_inputs = parse_json_field(latest_run.get("inputs_json"), {}) if latest_run else {}
+    current_segment = latest_inputs.get("segment_label") or ("자동 패턴 추천" if preview_strategy.get("auto_mode") else "수동 타겟팅")
+    execution_mode = "자동 모드" if preview_strategy.get("auto_mode") else "수동 모드"
+
+    top_left, top_center, top_right = st.columns([1.1, 1.1, 1.6])
+    with top_left:
         with st.container(border=True):
-            st.markdown("##### 오늘 브리핑")
-            st.markdown(
-                f"""
-                - 기준 날짜: **{format_local_date(today_value)}**
-                - 대상 국가: **{display_country(selected_country)} ({selected_country})**
-                - 실행 방식: **{"자동 모드" if preview_strategy.get("auto_mode") else "수동 모드"}**
-                - 기본 공략 방향: **{display_strategy_bias(preview_strategy.get("strategy_bias"))}**
-                """
-            )
-    with summary_right:
+            st.markdown("##### 실행 요약")
+            st.caption("오늘 바로 보는 핵심 설정")
+            st.metric("대상 국가", f"{display_country(selected_country)} ({selected_country})")
+            st.caption(f"기준 날짜: {format_local_date(today_value)}")
+            st.caption(f"실행 방식: {execution_mode}")
+    with top_center:
         with st.container(border=True):
-            st.markdown("##### 이번 실행 해석")
+            st.markdown("##### 공략 방향")
+            st.metric("세그먼트/바이어스", str(current_segment))
+            st.caption(f"전략 편향: {display_strategy_bias(preview_strategy.get('strategy_bias'))}")
+            st.caption(f"선택 패턴: {len(selected_patterns)}개")
+    with top_right:
+        with st.container(border=True):
+            st.markdown("##### 이번 실행 한 줄 해석")
             if preview_strategy.get("auto_mode"):
                 st.write(
-                    f"탐색 조건을 비워둬서 시스템이 자동으로 공략 패턴을 골랐습니다. "
-                    f"이번에는 **{len(preview_strategy.get('selected_patterns', []))}개 패턴**을 우선 검토하고, "
-                    f"실제 탐색 문장은 **`{preview_strategy.get('resolved_query', '-')}`** 입니다."
+                    "탐색 조건이 비어 있어 시스템이 자동으로 공략 패턴을 고른 상태입니다. "
+                    "이번 런은 아래 쿼리를 기준으로 첫 리드 풀을 만드는 데 집중합니다."
                 )
             else:
                 st.write(
-                    f"직접 입력한 탐색 조건을 기준으로 실행합니다. "
-                    f"이번 탐색 문장은 **`{preview_strategy.get('resolved_query', '-')}`** 입니다."
+                    "직접 입력한 탐색 조건을 우선으로 사용합니다. "
+                    "아래 쿼리를 그대로 기준 삼아 같은 결의 회사만 찾도록 움직입니다."
                 )
+            st.markdown(f"**실제 탐색 기준**  \n`{preview_strategy.get('resolved_query', '-')}`")
 
-    if preview_strategy.get("auto_mode"):
-        st.markdown("**자동 탐색 기준**")
-        st.write(
-            "탐색 조건이 비어 있어 자동 모드가 켜졌습니다. "
-            f"이번 실행에서는 `{preview_strategy.get('resolved_query', '-')}` 기준으로 회사를 찾습니다."
-        )
-    else:
-        st.caption("탐색 조건을 직접 입력한 수동 모드입니다.")
-
-    selected_patterns = preview_strategy.get("selected_patterns", [])
     if selected_patterns:
-        render_adjustable_dataframe(
-            "자동으로 선택된 공략 패턴",
-            [
-                {
-                    "패턴": row["pattern_name"],
-                    "추천 업종": ", ".join(row["target_industries"]),
-                    "우리가 유리한 이유": row["why_we_can_win"],
-                    "추천 오퍼": row["offer_fit"],
-                    "우선순위": row["priority_score"],
-                }
-                for row in selected_patterns
-            ],
-            "strategy_patterns",
-        )
+        with st.expander("자동으로 선택된 공략 패턴", expanded=False):
+            render_adjustable_dataframe(
+                "자동으로 선택된 공략 패턴",
+                [
+                    {
+                        "패턴": row["pattern_name"],
+                        "추천 업종": ", ".join(row["target_industries"]),
+                        "우리가 유리한 이유": row["why_we_can_win"],
+                        "추천 오퍼": row["offer_fit"],
+                        "우선순위": row["priority_score"],
+                    }
+                    for row in selected_patterns
+                ],
+                "strategy_patterns",
+            )
 
     if not latest_run:
         return
 
+    if latest_inputs.get("segment_label"):
+        st.info(
+            f"최근 실행 세그먼트: **{latest_inputs.get('segment_label')}** | "
+            f"국가: **{display_country(latest_run.get('target_country'))}**"
+        )
+
     strategy_snapshot = get_run_strategy_snapshot(latest_run)
     quality_rows = build_quality_rows(latest_run["id"])
 
-    st.write(
-        f"실제 사용된 탐색 기준: `{strategy_snapshot.get('resolved_query') or latest_run.get('lead_query') or '-'}`"
+    st.caption(
+        f"최근 실행 기준 쿼리: `{strategy_snapshot.get('resolved_query') or latest_run.get('lead_query') or '-'}`"
     )
     st.caption(quality_summary_text(quality_rows))
 
     if quality_rows:
+        with st.expander("최근 실행 전략 로그", expanded=False):
+            render_adjustable_dataframe(
+                "최근 실행 전략 로그",
+                [
+                    {
+                        "회사명": row["company_name"],
+                        "점수": row["score"],
+                        "등급": row["label"],
+                        "빠진 섹션": ", ".join(row["missing_sections"][:3]) if row["missing_sections"] else "-",
+                    }
+                    for row in quality_rows
+                ],
+                "strategy_quality",
+            )
+
+
+def render_segment_calendar_tab(*, notify_email: str, test_mode: bool) -> None:
+    st.subheader("세그먼트 캘린더")
+    st.caption("세그먼트별 발송 계획을 날짜에 배치하고, 그 일정으로 바로 런을 시작할 수 있습니다.")
+
+    presets = list_segment_presets()
+    preset_lookup = {preset["id"]: preset for preset in presets}
+
+    for preset in presets:
+        with st.container(border=True):
+            st.markdown(f"##### {preset['label']}")
+            st.write(preset["description"])
+            st.write(f"오퍼: `{preset['offer']}`")
+            st.write(f"추천 국가: {', '.join(display_country(code) for code in preset['recommended_countries'])}")
+            st.write(f"대상 직책: {', '.join(preset['target_roles'])}")
+            st.write("대표 포트폴리오")
+            for portfolio_row in preset["portfolio"]:
+                st.markdown(f"- {portfolio_row}")
+
+    st.markdown("#### 일정 추가")
+    with st.form("segment_calendar_form", clear_on_submit=False):
+        schedule_date = st.date_input("캘린더 날짜", value=date.today(), key="segment_calendar_form_date")
+        segment_id = st.selectbox(
+            "세그먼트",
+            options=[preset["id"] for preset in presets],
+            format_func=lambda value: preset_lookup[value]["label"],
+            key="segment_calendar_form_segment",
+        )
+        selected_preset = preset_lookup[segment_id]
+        recommended_countries = selected_preset.get("recommended_countries") or COUNTRIES
+        default_country = selected_preset.get("default_country") or recommended_countries[0]
+        target_country = st.selectbox(
+            "대상 국가",
+            options=recommended_countries,
+            index=max(0, recommended_countries.index(default_country)) if default_country in recommended_countries else 0,
+            format_func=lambda code: f"{display_country(code)} ({code})",
+            key="segment_calendar_form_country",
+        )
+        send_window = st.selectbox("발송 슬롯", options=["오전", "오후", "종일"], key="segment_calendar_form_window")
+        max_companies = st.number_input(
+            "신규 리드 목표",
+            min_value=1,
+            max_value=50,
+            value=int(selected_preset.get("default_max_companies") or 10),
+            step=1,
+            key="segment_calendar_form_max_companies",
+        )
+        notes = st.text_area("운영 메모", height=90, key="segment_calendar_form_notes")
+        preview_query = selected_preset.get("country_queries", {}).get(target_country) or selected_preset.get("country_queries", {}).get("default") or ""
+        st.caption(f"이 세그먼트로 실행할 탐색 쿼리: `{preview_query}`")
+        submitted = st.form_submit_button("일정 저장", use_container_width=True)
+
+    if submitted:
+        entry = create_segment_calendar_entry(
+            schedule_date=schedule_date,
+            segment_id=segment_id,
+            target_country=target_country,
+            send_window=send_window,
+            max_companies=int(max_companies),
+            notes=notes,
+        )
+        add_segment_calendar_entry(entry)
+        set_ui_notice("success", f"{format_local_date(schedule_date)} 일정에 `{entry['segment_label']}` 세그먼트를 추가했습니다.")
+        st.rerun()
+
+    st.markdown("#### 일정 보기")
+    selected_date = st.date_input("일정 확인 날짜", value=date.today(), key="segment_calendar_view_date")
+    selected_rows = list_segment_calendar_entries_for_date(selected_date)
+    if not selected_rows:
+        st.caption(f"{format_local_date(selected_date)}에는 등록된 세그먼트 일정이 없습니다.")
+    else:
+        for row in selected_rows:
+            preset = get_segment_preset(str(row.get("segment_id") or ""))
+            with st.container(border=True):
+                st.markdown(
+                    f"##### {row.get('segment_label', '-')} | {display_country(row.get('target_country'))} ({row.get('target_country')}) | {row.get('send_window')}"
+                )
+                if preset:
+                    st.write(f"오퍼: `{preset['offer']}`")
+                st.write(f"신규 리드 목표: `{row.get('max_companies')}`")
+                st.write(f"탐색 쿼리: `{row.get('lead_query') or '-'}`")
+                if row.get("notes"):
+                    st.write(f"메모: {row['notes']}")
+                if row.get("last_launched_at"):
+                    st.caption(f"마지막 실행: {format_local_datetime(row.get('last_launched_at'))}")
+
+                action_left, action_right = st.columns([1.4, 1.0])
+                with action_left:
+                    if st.button("이 일정으로 실행", key=f"segment_calendar_launch_{row['id']}", use_container_width=True):
+                        launch_background_run(
+                            target_country=str(row.get("target_country") or "US"),
+                            lead_query=str(row.get("lead_query") or ""),
+                            lead_mode="region_or_industry",
+                            max_companies=int(row.get("max_companies") or 10),
+                            notify_email=notify_email,
+                            test_mode=test_mode,
+                            trigger_source="segment_calendar",
+                            segment_id=str(row.get("segment_id") or ""),
+                            segment_label=str(row.get("segment_label") or ""),
+                            segment_brief=str(row.get("segment_brief") or ""),
+                        )
+                        mark_segment_calendar_entry_launched(str(row["id"]))
+                        set_ui_notice("success", f"`{row.get('segment_label')}` 일정으로 런을 시작했습니다.")
+                        st.rerun()
+                with action_right:
+                    if st.button("일정 삭제", key=f"segment_calendar_delete_{row['id']}", use_container_width=True):
+                        delete_segment_calendar_entry(str(row["id"]))
+                        set_ui_notice("success", "세그먼트 일정을 삭제했습니다.")
+                        st.rerun()
+
+    upcoming_rows = list_upcoming_segment_calendar_entries(days=14)
+    if upcoming_rows:
         render_adjustable_dataframe(
-            "최근 실행 전략 로그",
+            "앞으로 14일 일정",
             [
                 {
-                    "회사명": row["company_name"],
-                    "점수": row["score"],
-                    "등급": row["label"],
-                    "빠진 섹션": ", ".join(row["missing_sections"][:3]) if row["missing_sections"] else "-",
+                    "날짜": format_local_date(date.fromisoformat(str(row["schedule_date"]))),
+                    "슬롯": row.get("send_window"),
+                    "세그먼트": row.get("segment_label"),
+                    "국가": display_country(row.get("target_country")),
+                    "리드 목표": row.get("max_companies"),
+                    "탐색 쿼리": row.get("lead_query"),
+                    "마지막 실행": format_local_datetime(row.get("last_launched_at")) if row.get("last_launched_at") else "-",
                 }
-                for row in quality_rows
+                for row in upcoming_rows
             ],
-            "strategy_quality",
+            "segment_calendar_upcoming",
         )
 
 
@@ -1644,6 +2466,161 @@ def render_notifications() -> None:
 def render_settings() -> None:
     backend_info = describe_runtime_backend()
     auto_send_settings = get_auto_send_settings()
+    pipeline_baselines = load_pipeline_baselines()
+    baseline_task_names = [
+        "lead_research_task",
+        "identity_disambiguation_task",
+        "lead_verification_task",
+        "website_audit_task",
+        "competitor_analysis_task",
+        "landing_page_task",
+        "marketing_recommendation_task",
+        "proposal_task",
+        "proposal_localization_task",
+        "email_outreach_task",
+        "email_localization_task",
+        "review_station",
+    ]
+    overview_task_names = [
+        "lead_research_task",
+        "identity_disambiguation_task",
+        "lead_verification_task",
+        "website_audit_task",
+        "competitor_analysis_task",
+        "landing_page_task",
+        "marketing_recommendation_task",
+        "proposal_task",
+        "proposal_localization_task",
+        "email_outreach_task",
+        "email_localization_task",
+    ]
+    log_files = list_recent_runtime_logs(limit=5)
+    average_baseline = round(
+        sum(int(pipeline_baselines.get(task_name, DEFAULT_PIPELINE_BASELINES_MINUTES.get(task_name, 5))) for task_name in baseline_task_names)
+        / len(baseline_task_names),
+        1,
+    )
+
+    st.subheader("운영 설정")
+    st.caption("기본 화면에는 핵심 운영값만 남기고, 세부 환경과 기준값은 아래 섹션에서 확인하도록 정리했습니다.")
+
+    summary_cols = st.columns(4)
+    summary_cols[0].metric("실행 백엔드", backend_info["label"])
+    summary_cols[1].metric("자동 발송 모드", auto_send_settings.mode)
+    summary_cols[2].metric("부서 기준 평균", f"{average_baseline}분")
+    summary_cols[3].metric("최근 로그", f"{len(log_files)}개")
+
+    with st.container(border=True):
+        left, right = st.columns([1.2, 1.0])
+        with left:
+            st.markdown("**현재 운영 요약**")
+            st.caption(
+                f"자동 발송 최소 제안서 점수 {auto_send_settings.min_proposal_score}점, "
+                f"실행당 최대 {auto_send_settings.max_items_per_run}건까지 처리합니다."
+            )
+            st.caption(
+                f"PDF 첨부는 {'필수' if auto_send_settings.require_pdf else '선택'}이며, "
+                f"기본 알림 메일은 `{os.environ.get('ALERT_EMAIL_TO', ALERT_EMAIL_DEFAULT)}` 입니다."
+            )
+        with right:
+            st.markdown("**조직 및 감시 상태**")
+            st.caption(f"메인 운영 부서 {len(overview_task_names)}개, 지원 조직 {len(SUPPORT_TEAM_CONFIG)}개가 연결되어 있습니다.")
+            if auto_send_settings.canary_email:
+                st.caption(f"카나리 수신 메일: `{auto_send_settings.canary_email}`")
+            else:
+                st.caption("카나리 수신 메일은 아직 비어 있습니다.")
+
+    with st.expander("운영 환경", expanded=False):
+        st.write(f"프로젝트 위치: `{PROJECT_ROOT}`")
+        st.write(f"운영 DB: `{DB_PATH}`")
+        st.write(f"파이썬 실행 파일: `{resolve_python_executable()}`")
+        st.write(f"현재 데이터 백엔드: `{backend_info['label']}`")
+        if backend_info.get("remote_url"):
+            st.write(f"Supabase URL: `{backend_info['remote_url']}`")
+        if backend_info.get("storage_bucket"):
+            st.write(f"Supabase Storage 버킷: `{backend_info['storage_bucket']}`")
+        if backend_info["backend"] == "supabase":
+            st.info("Notion 매핑이 없어도 현재는 Supabase를 운영 저장소로 사용합니다.")
+        else:
+            st.info("Notion 매핑이 없어도 현재는 로컬 SQLite를 운영 저장소로 사용합니다.")
+
+    with st.expander("부서별 예상 소요시간 기준", expanded=False):
+        st.caption("실행 노선도의 ETA 계산에 사용하는 기준값입니다. 실제 운영 흐름에 맞게 분 단위로 조정하세요.")
+        with st.form("pipeline_baseline_form"):
+            inputs: dict[str, int] = {}
+            columns = st.columns(2)
+            for index, task_name in enumerate(baseline_task_names):
+                with columns[index % 2]:
+                    if task_name == "review_station":
+                        department_label = "검토 운영본부"
+                        task_label = "확인 판단 / 시작 전 조정"
+                    else:
+                        department_label = DEPARTMENT_CONFIG.get(task_name, {}).get("department", display_task_name(task_name))
+                        task_label = display_task_name(task_name)
+                    inputs[task_name] = int(
+                        st.number_input(
+                            f"{department_label} · {task_label}",
+                            min_value=1,
+                            max_value=180,
+                            value=int(pipeline_baselines.get(task_name, DEFAULT_PIPELINE_BASELINES_MINUTES.get(task_name, 5))),
+                            step=1,
+                            key=f"baseline_{task_name}",
+                        )
+                    )
+            save_submitted = st.form_submit_button("기준 시간 저장", use_container_width=True)
+        if save_submitted:
+            save_pipeline_baselines(inputs)
+            set_ui_notice("success", "부서별 예상 소요시간 기준을 저장했습니다.")
+            st.rerun()
+        if st.button("기본 기준으로 되돌리기", use_container_width=True):
+            save_pipeline_baselines(DEFAULT_PIPELINE_BASELINES_MINUTES)
+            set_ui_notice("success", "부서별 예상 소요시간 기준을 기본값으로 되돌렸습니다.")
+            st.rerun()
+
+    with st.expander("최근 실행 로그", expanded=False):
+        if log_files:
+            selected_log = st.selectbox("로그 파일", [f.name for f in log_files], key="settings_recent_log")
+            log_path = next((path for path in log_files if path.name == selected_log), log_files[0])
+            try:
+                content = read_log_tail(log_path, max_chars=4000)
+                st.code(content or "(비어 있음)", language="text")
+            except Exception as e:
+                st.warning(f"로그 읽기 실패: {e}")
+        else:
+            if PIPELINE_LOG_DIR.exists():
+                st.info("로그 파일이 아직 없습니다.")
+            else:
+                st.info(f"로그 디렉터리가 없습니다: {PIPELINE_LOG_DIR}")
+
+    with st.expander("구성현황", expanded=False):
+        st.caption("메인 파이프라인 부서가 어떤 역할과 참여 인원으로 구성되어 있는지 정리해둔 영역입니다.")
+        for task_name in overview_task_names:
+            department = DEPARTMENT_CONFIG.get(task_name, {})
+            members = get_department_members(task_name)
+            support = department.get("support") or []
+            with st.container(border=True):
+                left, right = st.columns([1.4, 1.0])
+                with left:
+                    st.markdown(f"**{department.get('department', display_task_name(task_name))}**")
+                    st.caption(display_task_name(task_name))
+                    st.write(department.get("summary") or "-")
+                with right:
+                    st.markdown("**참여 인원**")
+                    for member in members:
+                        st.markdown(f"- **{member['name']}** (`{member['crew_label']}`)")
+                        st.caption(f"맡은 역할: {member['role']}")
+                        st.caption(f"집중 비전: {member['vision']}")
+                    if support:
+                        st.markdown(f"**지원팀**: {', '.join(support)}")
+                    else:
+                        st.caption("지원팀 없음")
+
+    with st.expander("지원 조직", expanded=False):
+        for team in SUPPORT_TEAM_CONFIG:
+            with st.expander(f"{team['department']} | {team['status']}", expanded=False):
+                for member_name, member_role in team["members"]:
+                    st.markdown(f"- **{member_name}**: {member_role}")
+    return
     st.subheader("운영 설정")
     st.write(f"프로젝트 위치: `{PROJECT_ROOT}`")
     st.write(f"운영 DB: `{DB_PATH}`")
@@ -1665,22 +2642,55 @@ def render_settings() -> None:
     if auto_send_settings.canary_email:
         st.write(f"카나리 수신 메일: `{auto_send_settings.canary_email}`")
     st.divider()
+    st.markdown("### 부서별 예상 소요시간 기준")
+    st.caption("실행 노선도의 ETA 계산에 사용됩니다. 실제 운영 흐름에 맞춰 분 단위로 조정하세요.")
+    with st.form("pipeline_baseline_form"):
+        inputs: dict[str, int] = {}
+        columns = st.columns(2)
+        for index, task_name in enumerate(baseline_task_names):
+            with columns[index % 2]:
+                if task_name == "review_station":
+                    department_label = "검토 운영본부"
+                    task_label = "승인 판단 / 재작업 조정"
+                else:
+                    department_label = DEPARTMENT_CONFIG.get(task_name, {}).get("department", display_task_name(task_name))
+                    task_label = display_task_name(task_name)
+                inputs[task_name] = int(
+                    st.number_input(
+                        f"{department_label} · {task_label}",
+                        min_value=1,
+                        max_value=180,
+                        value=int(pipeline_baselines.get(task_name, DEFAULT_PIPELINE_BASELINES_MINUTES.get(task_name, 5))),
+                        step=1,
+                        key=f"baseline_{task_name}",
+                    )
+                )
+        save_submitted = st.form_submit_button("기준 시간 저장", use_container_width=True)
+    if save_submitted:
+        save_pipeline_baselines(inputs)
+        set_ui_notice("success", "부서별 예상 소요시간 기준을 저장했습니다.")
+        st.rerun()
+    if st.button("기본 기준으로 되돌리기", use_container_width=True):
+        save_pipeline_baselines(DEFAULT_PIPELINE_BASELINES_MINUTES)
+        set_ui_notice("success", "부서별 예상 소요시간 기준을 기본값으로 되돌렸습니다.")
+        st.rerun()
+
+    st.divider()
     st.markdown("### 최근 실행 로그")
-    log_dir = PROJECT_ROOT / ".runtime" / "logs"
-    if log_dir.exists():
-        log_files = sorted(log_dir.glob("dashboard-run-*.log"), reverse=True)[:5]
-        if log_files:
-            selected_log = st.selectbox("로그 파일", [f.name for f in log_files])
-            log_path = log_dir / selected_log
-            try:
-                content = log_path.read_text(encoding="utf-8", errors="replace")
-                st.code(content[-4000:] if len(content) > 4000 else content or "(비어있음)", language="text")
-            except Exception as e:
-                st.warning(f"로그 읽기 실패: {e}")
-        else:
-            st.info("로그 파일이 없습니다.")
+    log_files = list_recent_runtime_logs(limit=5)
+    if log_files:
+        selected_log = st.selectbox("로그 파일", [f.name for f in log_files], key="settings_recent_log")
+        log_path = next((path for path in log_files if path.name == selected_log), log_files[0])
+        try:
+            content = read_log_tail(log_path, max_chars=4000)
+            st.code(content or "(비어있음)", language="text")
+        except Exception as e:
+            st.warning(f"로그 읽기 실패: {e}")
     else:
-        st.info(f"로그 디렉토리가 없습니다: {log_dir}")
+        if PIPELINE_LOG_DIR.exists():
+            st.info("로그 파일이 없습니다.")
+        else:
+            st.info(f"로그 디렉토리가 없습니다: {PIPELINE_LOG_DIR}")
 
     st.divider()
     st.markdown("### 구성현황")
@@ -1729,6 +2739,7 @@ def render_settings() -> None:
 def main() -> None:
     load_runtime()
     st.set_page_config(page_title="세일즈 운영 콘솔", layout="wide")
+    inject_app_shell_styles()
     st.title("세일즈 운영 콘솔")
     st.caption(f"오늘 날짜: {format_local_date(date.today())} | 웹에서 실행과 검토를 관리하고, 메일은 알림 용도로만 사용합니다.")
     render_ui_notice()
@@ -1739,76 +2750,91 @@ def main() -> None:
 
     with st.sidebar:
         st.header("실행 시작")
-        target_country = st.selectbox(
-            "대상 국가",
-            COUNTRIES,
-            index=0,
-            format_func=lambda code: f"{COUNTRY_LABELS[code]} ({code})",
-        )
-        country_defaults = COUNTRY_DEFAULTS[target_country]
+        with st.container(border=True):
+            target_country = st.selectbox(
+                "대상 국가",
+                COUNTRIES,
+                index=0,
+                format_func=lambda code: f"{COUNTRY_LABELS[code]} ({code})",
+            )
+            country_defaults = COUNTRY_DEFAULTS[target_country]
 
-        lead_mode = st.selectbox(
-            "탐색 방식",
-            ["region_or_industry", "company_name"],
-            index=0,
-            format_func=lambda value: LEAD_MODE_LABELS.get(value, value),
-        )
-        lead_query = st.text_area(
-            "탐색 조건",
-            value="",
-            height=100,
-            placeholder=(
-                "비워두면 자동 모드로 실행됩니다. "
-                f"예시 기준: `{country_defaults['lead_query']}`"
-            ),
-        )
-        preview_strategy = build_strategy_snapshot(
-            target_country=target_country,
-            lead_mode=lead_mode,
-            lead_query=lead_query,
-        )
-
-        max_companies = st.slider("최대 회사 수", min_value=1, max_value=10, value=2)
-        notify_email = st.text_input(
-            "알림 받을 메일",
-            value=os.environ.get("ALERT_EMAIL_TO", ALERT_EMAIL_DEFAULT),
-            key="alert_email_input",
-        )
-        test_mode = st.checkbox("테스트 모드", value=True)
-
-        if running_run:
-            st.warning(
-                f"실행 중 (4초마다 자동 갱신)\n\n"
-                f"ID: `{running_run['id'][:8]}` | 현재: {display_task_name(running_run.get('current_task'))}"
+            lead_mode = st.selectbox(
+                "탐색 방식",
+                ["region_or_industry", "company_name"],
+                index=0,
+                format_func=lambda value: LEAD_MODE_LABELS.get(value, value),
+            )
+            lead_query = st.text_area(
+                "탐색 조건",
+                value="",
+                height=100,
+                placeholder=(
+                    "비워두면 자동 모드로 실행됩니다. "
+                    f"예시 기준: `{country_defaults['lead_query']}`"
+                ),
+            )
+            preview_strategy = build_strategy_snapshot(
+                target_country=target_country,
+                lead_mode=lead_mode,
+                lead_query=lead_query,
             )
 
-        if st.button("시작", type="primary", use_container_width=True):
-            if running_run:
-                st.error("이미 실행 중인 작업이 있습니다. 끝난 뒤 다시 시작해주세요.")
-            elif lead_mode == "company_name" and not lead_query.strip():
-                st.error("회사명 지정 모드에서는 탐색 조건을 비워둘 수 없습니다. 회사명을 입력해주세요.")
-            else:
-                launch_background_run(
-                    target_country=target_country,
-                    lead_query=lead_query.strip(),
-                    lead_mode=lead_mode,
-                    max_companies=max_companies,
-                    notify_email=notify_email.strip(),
-                    test_mode=test_mode,
-                )
-                st.session_state["run_just_launched"] = True
-                set_ui_notice("success", "실행을 시작했습니다. 실행 현황 탭에서 진행 상태를 확인하세요.")
-                st.rerun()
+            max_companies = st.slider("최대 회사 수", min_value=1, max_value=10, value=2)
+            notify_email = st.text_input(
+                "알림 받을 메일",
+                value=os.environ.get("ALERT_EMAIL_TO", ALERT_EMAIL_DEFAULT),
+                key="alert_email_input",
+            )
+            test_mode = st.checkbox("테스트 모드", value=True)
+            st.caption(
+                f"실행 프리뷰: {'자동 모드' if preview_strategy.get('auto_mode') else '수동 모드'} · "
+                f"패턴 {len(preview_strategy.get('selected_patterns', []))}개"
+            )
 
-        if st.button("새로고침", use_container_width=True):
-            st.rerun()
+            if running_run:
+                st.warning(
+                    f"실행 중 (4초마다 자동 갱신)\n\n"
+                    f"ID: `{running_run['id'][:8]}` | 현재: {display_task_name(running_run.get('current_task'))}"
+                )
+
+            if st.button("시작", type="primary", use_container_width=True):
+                if running_run:
+                    st.error("이미 실행 중인 작업이 있습니다. 끝난 뒤 다시 시작해주세요.")
+                elif lead_mode == "company_name" and not lead_query.strip():
+                    st.error("회사명 지정 모드에서는 탐색 조건을 비워둘 수 없습니다. 회사명을 입력해주세요.")
+                else:
+                    launch_background_run(
+                        target_country=target_country,
+                        lead_query=lead_query.strip(),
+                        lead_mode=lead_mode,
+                        max_companies=max_companies,
+                        notify_email=notify_email.strip(),
+                        test_mode=test_mode,
+                    )
+                    st.session_state["run_just_launched"] = True
+                    set_ui_notice("success", "실행을 시작했습니다. 실행 현황 탭에서 진행 상태를 확인하세요.")
+                    st.rerun()
+
+            if st.button("새로고침", use_container_width=True):
+                st.rerun()
 
     top_left, top_right = st.columns([5.2, 1.2])
     with top_right:
         with st.popover("총괄 비서", use_container_width=True):
             render_copilot_panel(latest_run)
 
-    tabs = st.tabs(["오늘의 전략", "실행 현황", "검토 대기", "산출물", "알림", "설정"])
+    tabs = st.tabs(
+        [
+            "오늘의 전략",
+            "세그먼트 캘린더",
+            "실행 현황",
+            "검토 대기",
+            "산출물",
+            "알림",
+            "설정",
+        ]
+    )
 
     with tabs[0]:
         render_strategy_tab(
@@ -1818,44 +2844,53 @@ def main() -> None:
         )
 
     with tabs[1]:
-        render_dashboard(latest_run)
-        st.divider()
-        selected_run = render_runs("runs_tab")
-        if selected_run:
-            st.markdown("**선택한 실행의 작업 목록**")
-            st.dataframe(
-                [
-                    {
-                        "순서": row["task_order"],
-                        "작업": display_task_name(row["task_name"]),
-                        "담당": (
-                            f"{get_department_members(row.get('task_name'))[0]['name']} "
-                            f"({get_department_members(row.get('task_name'))[0]['crew_label']})"
-                            if get_department_members(row.get("task_name"))
-                            else "-"
-                        ),
-                        "모델": row["model_name"],
-                        "상태": display_status(row["status"]),
-                        "토큰": row["total_tokens"],
-                        "비용(USD)": row["estimated_cost_usd"],
-                    }
-                    for row in list_tasks(selected_run["id"])
-                ],
-                hide_index=True,
-                use_container_width=True,
-            )
+        render_segment_calendar_tab(
+            notify_email=notify_email.strip(),
+            test_mode=test_mode,
+        )
 
     with tabs[2]:
-        render_approval_queue(st.session_state.get("alert_email_input", ALERT_EMAIL_DEFAULT))
+        render_dashboard(latest_run)
+        st.divider()
+        with st.expander("이전 실행 기록 보기", expanded=False):
+            selected_run = render_runs("runs_tab")
+            if selected_run:
+                st.markdown("**선택한 실행의 작업 목록**")
+                st.dataframe(
+                    [
+                        {
+                            "순서": row["task_order"],
+                            "작업": display_task_name(row["task_name"]),
+                            "담당": (
+                                f"{get_department_members(row.get('task_name'))[0]['name']} "
+                                f"({get_department_members(row.get('task_name'))[0]['crew_label']})"
+                                if get_department_members(row.get("task_name"))
+                                else "-"
+                            ),
+                            "모델": row["model_name"],
+                            "상태": display_status(row["status"]),
+                            "토큰": row["total_tokens"],
+                            "비용(USD)": row["estimated_cost_usd"],
+                        }
+                        for row in list_tasks(selected_run["id"])
+                    ],
+                    hide_index=True,
+                    use_container_width=True,
+                )
+                with st.expander("선택한 실행의 로그", expanded=False):
+                    render_run_log_panel(selected_run, key_prefix=f"selected_run_log_{selected_run.get('id', 'run')}")
 
     with tabs[3]:
+        render_approval_queue(st.session_state.get("alert_email_input", ALERT_EMAIL_DEFAULT))
+
+    with tabs[4]:
         selected_run = render_runs("assets_tab")
         render_assets(selected_run or latest_run)
 
-    with tabs[4]:
+    with tabs[5]:
         render_notifications()
 
-    with tabs[5]:
+    with tabs[6]:
         render_settings()
 
     if running_run:
