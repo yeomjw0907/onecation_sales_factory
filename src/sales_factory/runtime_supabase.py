@@ -96,6 +96,16 @@ def get_supabase_key() -> str:
     return ""
 
 
+def get_supabase_key_candidates() -> list[tuple[str, str]]:
+    load_project_env()
+    candidates: list[tuple[str, str]] = []
+    for env_name in SUPABASE_KEY_ENVS:
+        value = (os.environ.get(env_name, "") or "").strip()
+        if value:
+            candidates.append((env_name, value))
+    return candidates
+
+
 def get_storage_bucket() -> str | None:
     load_project_env()
     bucket = (os.environ.get(SUPABASE_STORAGE_BUCKET_ENV, "") or "").strip()
@@ -134,14 +144,14 @@ def get_supabase_client() -> Client:
         )
 
     url = get_supabase_url()
-    key = get_supabase_key()
-    if not url or not key:
+    candidates = get_supabase_key_candidates()
+    if not url or not candidates:
         raise RuntimeError(
             "Supabase backend requires SUPABASE_URL and SUPABASE_SECRET_KEY "
             "(or SUPABASE_SERVICE_ROLE_KEY)."
         )
 
-    _CLIENT = create_client(url, key)
+    _CLIENT = create_client(url, candidates[0][1])
     return _CLIENT
 
 
@@ -171,16 +181,43 @@ def _apply_filters(query: Any, filters: list[tuple[str, str, Any]] | None) -> An
 
 
 def verify_schema() -> None:
-    client = get_supabase_client()
-    required_tables = ["runs", "task_events", "assets", "approval_items", "notifications"]
-    try:
-        for table in required_tables:
-            client.table(table).select("id").limit(1).execute()
-    except Exception as exc:  # pragma: no cover - needs real remote project
+    global _CLIENT
+
+    if not is_supabase_backend():
+        return
+    if create_client is None:
         raise RuntimeError(
-            "Supabase runtime schema is missing or unreachable. "
-            "Apply `supabase/runtime_schema.sql` and verify the credentials."
-        ) from exc
+            "supabase package is not installed. Run `uv add supabase` before enabling the Supabase backend."
+        )
+
+    url = get_supabase_url()
+    candidates = get_supabase_key_candidates()
+    if not url or not candidates:
+        raise RuntimeError(
+            "Supabase backend requires SUPABASE_URL and SUPABASE_SECRET_KEY "
+            "(or SUPABASE_SERVICE_ROLE_KEY)."
+        )
+
+    required_tables = ["runs", "task_events", "assets", "approval_items", "notifications"]
+    failures: list[str] = []
+
+    for env_name, key in candidates:
+        client = create_client(url, key)
+        try:
+            for table in required_tables:
+                client.table(table).select("id").limit(1).execute()
+            _CLIENT = client
+            return
+        except Exception as exc:  # pragma: no cover - depends on remote project state
+            failures.append(f"{env_name}: {type(exc).__name__}: {exc}")
+
+    failure_summary = " | ".join(failures[:2])
+    raise RuntimeError(
+        "Supabase runtime schema is missing or unreachable. "
+        "Apply `supabase/runtime_schema.sql` and verify the credentials. "
+        f"Tried keys: {', '.join(env_name for env_name, _ in candidates)}. "
+        f"Last errors: {failure_summary}"
+    )
 
 
 def select_rows(
