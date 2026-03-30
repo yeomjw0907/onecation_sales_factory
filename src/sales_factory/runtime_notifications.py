@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import os
 import smtplib
+import urllib.request
 from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -72,6 +74,25 @@ def send_email_message(
         smtp.sendmail(from_email, [to_email], message.as_string())
     finally:
         smtp.quit()
+
+
+def send_slack_message(text: str, blocks: list | None = None) -> None:
+    load_env_file()
+    webhook_url = os.environ.get("SLACK_WEBHOOK_URL", "").strip()
+    if not webhook_url:
+        return
+    payload: dict = {"text": text}
+    if blocks:
+        payload["blocks"] = blocks
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        webhook_url,
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=10):
+        pass
 
 
 def send_alert_email(

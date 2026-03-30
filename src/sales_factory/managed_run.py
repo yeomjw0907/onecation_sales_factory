@@ -43,7 +43,7 @@ from sales_factory.runtime_db import (
     update_run,
     update_task,
 )
-from sales_factory.runtime_notifications import send_alert_email
+from sales_factory.runtime_notifications import send_alert_email, send_slack_message
 from sales_factory.runtime_supabase import read_asset_text
 from sales_factory.strategy_runtime import build_strategy_snapshot
 
@@ -772,6 +772,12 @@ def run_managed(args: argparse.Namespace) -> str:
     )
     register_tasks(run_id, task_plan)
 
+    _country = args.target_country or "-"
+    _mode = "[테스트]" if args.test_mode else "[실제]"
+    send_slack_message(
+        f"🚀 {_mode} 파이프라인 시작 | 국가: {_country} | 최대 {args.max_companies}개 기업 | ID: {run_id[:8]}"
+    )
+
     if task_plan:
         first = task_plan[0]
         update_task(run_id, first["task_name"], status="running", started_at=now_iso())
@@ -949,6 +955,17 @@ def run_managed(args: argparse.Namespace) -> str:
                 estimated_cost=estimated_cost,
             )
             send_runtime_notification(run_id, args.notify_email, subject, body)
+
+        if approval_count:
+            send_slack_message(
+                f"✅ 파이프라인 완료 — 검토 대기 {approval_count}건 | 국가: {args.target_country} | "
+                f"비용: ${estimated_cost:.4f} | ID: {run_id[:8]}"
+            )
+        else:
+            send_slack_message(
+                f"✅ 파이프라인 완료 | 국가: {args.target_country} | "
+                f"비용: ${estimated_cost:.4f} | ID: {run_id[:8]}"
+            )
         return run_id
     except Exception as exc:
         update_run(
@@ -969,6 +986,9 @@ def run_managed(args: argparse.Namespace) -> str:
                 error_message=str(exc),
             )
             send_runtime_notification(run_id, args.notify_email, subject, body)
+        send_slack_message(
+            f"❌ 파이프라인 실패 | 국가: {args.target_country} | ID: {run_id[:8]}\n오류: {str(exc)[:200]}"
+        )
         raise
     finally:
         stop_event.set()
