@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -95,7 +96,7 @@ COUNTRY_DEFAULTS = {
         "lead_query": "Dubai printing or packaging companies with outdated websites",
     },
 }
-ALERT_EMAIL_DEFAULT = "yeomjw0907@gmail.com"
+ALERT_EMAIL_DEFAULT = os.environ.get("ALERT_EMAIL_TO", "")
 KOREAN_WEEKDAYS = ["월", "화", "수", "목", "금", "토", "일"]
 
 LEAD_MODE_LABELS = {
@@ -143,6 +144,15 @@ COPILOT_QUICK_QUESTIONS = {
     "오늘 비용": "오늘 비용 얼마나 썼어?",
     "다음 추천": "다음에는 뭘 하는 게 좋아?",
 }
+VALIDATION_ISSUE_LABELS = {
+    "missing_pdf": "PDF 파일 없음",
+    "missing_docx": "Word 파일 없음",
+    "low_score": "제안서 품질 점수 미달",
+    "missing_email": "메일 시퀀스 없음",
+    "missing_proposal": "제안서 없음",
+    "score_below_threshold": "품질 기준 미달",
+}
+
 STRATEGY_BIAS_LABELS = {
     "general_digital_recovery": "기본 디지털 회복형",
     "korea_entry_specialist": "한국 진출 특화형",
@@ -446,6 +456,16 @@ def format_local_date(value: date | None) -> str:
     if not value:
         return "-"
     return f"{value.isoformat()} ({KOREAN_WEEKDAYS[value.weekday()]})"
+
+
+def format_local_datetime(value: str | None) -> str:
+    if not value:
+        return "-"
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return f"{dt.strftime('%m-%d %H:%M')} ({KOREAN_WEEKDAYS[dt.weekday()]})"
+    except ValueError:
+        return value[:16] if value else "-"
 
 
 def filter_rows_by_date(rows: list[dict[str, Any]], field: str, selected_date: date | None) -> list[dict[str, Any]]:
@@ -813,21 +833,26 @@ def render_dashboard(latest_run: dict[str, Any] | None) -> None:
     c5.metric("현재 작업", display_task_name(latest_run.get("current_task")))
     current_members = get_department_members(latest_run.get("current_task"))
     current_staff = current_members[0] if current_members else {"name": "-", "crew_label": "-"}
-    c6.metric("현재 담당", f"{current_staff['name']} ({current_staff['crew_label']})")
+    c6.metric("현재 담당", f"{current_staff['name']} ({display_task_name(current_staff['crew_label'])})")
     c7.metric("예상 비용", f"${float(latest_run.get('estimated_cost_usd', 0) or 0):.4f}")
-    c8.metric("마지막 갱신", latest_run.get("last_heartbeat_at") or "-")
+    c8.metric("마지막 갱신", format_local_datetime(latest_run.get("last_heartbeat_at")))
 
     auto_summary = summarize_run_auto_delivery(latest_run)
     if auto_summary:
-        st.caption(
-            "자동발송 요약: "
-            f"mode={auto_summary.get('mode', 'manual')} | "
-            f"eligible={auto_summary.get('eligible_count', 0)} | "
-            f"blocked={auto_summary.get('blocked_count', 0)} | "
-            f"shadow={auto_summary.get('shadow_simulated_count', 0)} | "
-            f"canary={auto_summary.get('canary_sent_count', 0)} | "
-            f"live={auto_summary.get('live_sent_count', 0)}"
-        )
+        _mode_labels = {"shadow": "그림자 모드", "canary": "카나리 모드", "live": "실제 발송", "manual": "수동"}
+        _mode = _mode_labels.get(auto_summary.get("mode", "manual"), auto_summary.get("mode", "수동"))
+        _parts = [f"발송 모드: {_mode}"]
+        if auto_summary.get("eligible_count"):
+            _parts.append(f"발송 가능 {auto_summary['eligible_count']}건")
+        if auto_summary.get("shadow_simulated_count"):
+            _parts.append(f"시뮬레이션 {auto_summary['shadow_simulated_count']}건")
+        if auto_summary.get("canary_sent_count"):
+            _parts.append(f"카나리 발송 {auto_summary['canary_sent_count']}건")
+        if auto_summary.get("live_sent_count"):
+            _parts.append(f"실제 발송 {auto_summary['live_sent_count']}건")
+        if auto_summary.get("blocked_count"):
+            _parts.append(f"차단 {auto_summary['blocked_count']}건")
+        st.caption(" · ".join(_parts))
 
     if latest_run.get("error_message"):
         st.error(latest_run["error_message"])
@@ -846,7 +871,7 @@ def render_dashboard(latest_run: dict[str, Any] | None) -> None:
                     "작업": display_task_name(row["task_name"]),
                     "담당": (
                         f"{get_department_members(row.get('task_name'))[0]['name']} "
-                        f"({get_department_members(row.get('task_name'))[0]['crew_label']})"
+                        f"({display_task_name(get_department_members(row.get('task_name'))[0]['crew_label'])})"
                         if get_department_members(row.get("task_name"))
                         else "-"
                     ),
@@ -1015,7 +1040,8 @@ def render_department_board(tasks: list[dict[str, Any]], latest_run: dict[str, A
                         st.caption(f"생성 시각 {item.get('created_at') or '-'}")
 
                     if validation_issues:
-                        st.warning("Validation 경고: " + " | ".join(validation_issues[:3]))
+                        _issue_labels = [VALIDATION_ISSUE_LABELS.get(v, v) for v in validation_issues[:3]]
+                        st.warning("검토 필요: " + " · ".join(_issue_labels))
 
                     if asset_rows:
                         st.dataframe(
@@ -1744,6 +1770,10 @@ def main() -> None:
 
     with tabs[5]:
         render_settings()
+
+    if running_run:
+        time.sleep(5)
+        st.rerun()
 
 
 if __name__ == "__main__":
