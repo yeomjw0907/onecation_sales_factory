@@ -1,4 +1,7 @@
-from typing import List
+import importlib.util
+import os
+from copy import deepcopy
+from typing import Any, List
 
 from crewai import Agent, Crew, Process, Task
 from crewai.agents.agent_builder.base_agent import BaseAgent
@@ -14,6 +17,30 @@ except Exception:
     _scrape_tool = None
 
 
+PROVIDER_FALLBACKS = {
+    "anthropic": "gemini/gemini-2.5-pro",
+}
+
+
+def _has_provider(provider_name: str) -> bool:
+    if provider_name == "anthropic":
+        return importlib.util.find_spec("anthropic") is not None and bool(
+            os.environ.get("ANTHROPIC_API_KEY", "").strip()
+        )
+    return True
+
+
+def resolve_llm_model(llm_name: str | None) -> str | None:
+    if not llm_name or "/" not in llm_name:
+        return llm_name
+
+    provider_name = llm_name.split("/", 1)[0].strip().lower()
+    if _has_provider(provider_name):
+        return llm_name
+
+    return PROVIDER_FALLBACKS.get(provider_name, llm_name)
+
+
 @CrewBase
 class SalesFactory:
     """SalesFactory crew"""
@@ -21,10 +48,15 @@ class SalesFactory:
     agents: List[BaseAgent]
     tasks: List[Task]
 
+    def _agent_config(self, agent_name: str) -> dict[str, Any]:
+        config = deepcopy(self.agents_config[agent_name])  # type: ignore[index]
+        config["llm"] = resolve_llm_model(config.get("llm"))
+        return config
+
     @agent
     def lead_finder(self) -> Agent:
         return Agent(
-            config=self.agents_config["lead_finder"],  # type: ignore[index]
+            config=self._agent_config("lead_finder"),
             verbose=True,
         )
 
@@ -32,7 +64,7 @@ class SalesFactory:
     def website_auditor(self) -> Agent:
         tools = [_scrape_tool] if _scrape_tool else []
         return Agent(
-            config=self.agents_config["website_auditor"],  # type: ignore[index]
+            config=self._agent_config("website_auditor"),
             tools=[t for t in tools if t is not None],
             verbose=True,
         )
@@ -41,7 +73,7 @@ class SalesFactory:
     def lead_verifier(self) -> Agent:
         tools = [_scrape_tool] if _scrape_tool else []
         return Agent(
-            config=self.agents_config["lead_verifier"],  # type: ignore[index]
+            config=self._agent_config("lead_verifier"),
             tools=[t for t in tools if t is not None],
             verbose=True,
         )
@@ -49,7 +81,7 @@ class SalesFactory:
     @agent
     def identity_disambiguator(self) -> Agent:
         return Agent(
-            config=self.agents_config["identity_disambiguator"],  # type: ignore[index]
+            config=self._agent_config("identity_disambiguator"),
             verbose=True,
         )
 
@@ -57,7 +89,7 @@ class SalesFactory:
     def competitor_analyst(self) -> Agent:
         tools = [_scrape_tool] if _scrape_tool else []
         return Agent(
-            config=self.agents_config["competitor_analyst"],  # type: ignore[index]
+            config=self._agent_config("competitor_analyst"),
             tools=[t for t in tools if t is not None],
             verbose=True,
         )
@@ -65,49 +97,49 @@ class SalesFactory:
     @agent
     def landing_page_builder(self) -> Agent:
         return Agent(
-            config=self.agents_config["landing_page_builder"],  # type: ignore[index]
+            config=self._agent_config("landing_page_builder"),
             verbose=True,
         )
 
     @agent
     def marketing_strategist(self) -> Agent:
         return Agent(
-            config=self.agents_config["marketing_strategist"],  # type: ignore[index]
+            config=self._agent_config("marketing_strategist"),
             verbose=True,
         )
 
     @agent
     def proposal_writer(self) -> Agent:
         return Agent(
-            config=self.agents_config["proposal_writer"],  # type: ignore[index]
+            config=self._agent_config("proposal_writer"),
             verbose=True,
         )
 
     @agent
     def proposal_localizer(self) -> Agent:
         return Agent(
-            config=self.agents_config["proposal_localizer"],  # type: ignore[index]
+            config=self._agent_config("proposal_localizer"),
             verbose=True,
         )
 
     @agent
     def email_writer(self) -> Agent:
         return Agent(
-            config=self.agents_config["email_writer"],  # type: ignore[index]
+            config=self._agent_config("email_writer"),
             verbose=True,
         )
 
     @agent
     def email_localizer(self) -> Agent:
         return Agent(
-            config=self.agents_config["email_localizer"],  # type: ignore[index]
+            config=self._agent_config("email_localizer"),
             verbose=True,
         )
 
     @agent
     def notion_logger(self) -> Agent:
         return Agent(
-            config=self.agents_config["notion_logger"],  # type: ignore[index]
+            config=self._agent_config("notion_logger"),
             tools=[NotionLogTool()],
             verbose=True,
         )
