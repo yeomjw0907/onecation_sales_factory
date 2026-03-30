@@ -9,7 +9,7 @@ from typing import Any
 from sales_factory.delivery_manager import extract_domain, normalize_company_key
 from sales_factory.proposal_quality import evaluate_proposal_path, evaluate_proposal_text
 from sales_factory.runtime_notifications import send_email_message
-from sales_factory.runtime_supabase import materialize_local_asset, read_asset_text
+from sales_factory.runtime_supabase import is_render_environment, materialize_local_asset, read_asset_text
 
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 PUBLIC_EMAIL_DOMAINS = {
@@ -86,8 +86,11 @@ def parse_json_value(value: Any, fallback: Any) -> Any:
 
 
 def get_auto_send_settings() -> AutoSendSettings:
-    raw_mode = os.environ.get("SALES_FACTORY_AUTO_SEND_MODE", "manual").strip().lower()
-    mode = raw_mode if raw_mode in VALID_AUTO_SEND_MODES else "manual"
+    raw_mode = os.environ.get("SALES_FACTORY_AUTO_SEND_MODE", "").strip().lower()
+    if raw_mode:
+        mode = raw_mode if raw_mode in VALID_AUTO_SEND_MODES else "manual"
+    else:
+        mode = "shadow" if is_render_environment() else "manual"
     return AutoSendSettings(
         mode=mode,
         canary_email=os.environ.get("SALES_FACTORY_AUTO_SEND_CANARY_EMAIL", "").strip(),

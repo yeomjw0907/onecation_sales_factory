@@ -15,6 +15,7 @@ from sales_factory.auto_delivery import (
     AutoSendSettings,
     assess_company_sendability,
     execute_auto_send,
+    get_auto_send_settings,
     load_verified_recipients,
 )
 
@@ -76,6 +77,20 @@ Thank you.
 
 
 class AutoDeliveryTests(unittest.TestCase):
+    def test_get_auto_send_settings_defaults_to_shadow_on_render(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "RENDER": "true",
+                "SALES_FACTORY_AUTO_SEND_MODE": "",
+            },
+            clear=True,
+        ):
+            with patch("sales_factory.runtime_supabase.load_project_env", return_value=None):
+                settings = get_auto_send_settings()
+
+        self.assertEqual(settings.mode, "shadow")
+
     def test_assess_company_sendability_accepts_matching_corporate_email(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)

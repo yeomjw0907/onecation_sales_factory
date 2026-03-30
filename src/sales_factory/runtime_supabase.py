@@ -56,14 +56,26 @@ def load_project_env() -> None:
     _ENV_LOADED = True
 
 
+def is_render_environment() -> bool:
+    load_project_env()
+    return bool((os.environ.get("RENDER", "") or "").strip()) or bool(
+        (os.environ.get("RENDER_EXTERNAL_URL", "") or "").strip()
+    )
+
+
 def get_runtime_backend() -> str:
     load_project_env()
-    backend = (os.environ.get(RUNTIME_BACKEND_ENV, "sqlite") or "sqlite").strip().lower()
-    if backend not in {"sqlite", "supabase"}:
-        raise RuntimeError(
-            f"{RUNTIME_BACKEND_ENV} must be either 'sqlite' or 'supabase', got '{backend}'."
-        )
-    return backend
+    explicit_backend = (os.environ.get(RUNTIME_BACKEND_ENV, "") or "").strip().lower()
+    if explicit_backend:
+        if explicit_backend not in {"sqlite", "supabase"}:
+            raise RuntimeError(
+                f"{RUNTIME_BACKEND_ENV} must be either 'sqlite' or 'supabase', got '{explicit_backend}'."
+            )
+        return explicit_backend
+
+    if get_supabase_url() and get_supabase_key():
+        return "supabase"
+    return "sqlite"
 
 
 def is_supabase_backend() -> bool:
