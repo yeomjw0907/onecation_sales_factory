@@ -7,6 +7,7 @@ import re
 import subprocess
 import sys
 import threading
+import time
 import traceback
 import uuid
 from contextlib import contextmanager
@@ -15,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from sales_factory.crew import SalesFactory
+from sales_factory.brand_proof import load_onecation_proof_points
 from sales_factory.proposal_quality import evaluate_proposal_path, evaluate_proposal_text
 from sales_factory.runtime_assets import build_company_assets, create_approval_queue
 from sales_factory.auto_delivery import (
@@ -68,6 +70,34 @@ MODEL_PRICING_USD_PER_MILLION: dict[str, tuple[float, float]] = {
     "claude-haiku-4-5": (0.80, 4.00),
 }
 
+LLM_RETRY_ATTEMPTS = 3
+LLM_RETRY_BASE_DELAY_SECONDS = 5
+RETRYABLE_LLM_ERROR_PATTERNS = (
+    "503",
+    "429",
+    "service unavailable",
+    "temporarily unavailable",
+    "temporarily overloaded",
+    "model is overloaded",
+    "resource exhausted",
+    "resourceexhausted",
+    "too many requests",
+    "try again later",
+)
+LLM_OVERLOAD_FALLBACKS: dict[str, tuple[str, ...]] = {
+    "gemini-2.5-pro": ("gemini/gemini-2.5-flash", "gemini/gemini-2.5-flash-lite", "openai/gpt-4o-mini"),
+    "gemini-2.5-flash": ("gemini/gemini-2.5-flash-lite", "openai/gpt-4o-mini"),
+    "gemini-2.5-flash-lite": ("openai/gpt-4o-mini",),
+    "claude-sonnet-4-5": ("gemini/gemini-2.5-pro", "openai/gpt-4o-mini"),
+    "claude-sonnet-4-20250514": ("gemini/gemini-2.5-pro", "openai/gpt-4o-mini"),
+    "claude-3-5-sonnet-20241022": ("gemini/gemini-2.5-pro", "openai/gpt-4o-mini"),
+}
+LLM_PROVIDER_ENV_KEYS = {
+    "anthropic": "ANTHROPIC_API_KEY",
+    "gemini": "GEMINI_API_KEY",
+    "openai": "OPENAI_API_KEY",
+}
+
 ASSET_TYPE_LABELS = {
     "proposal": "제안서 원본",
     "proposal_docx": "제안서 Word",
@@ -116,6 +146,75 @@ def estimate_cost_usd(model_name: str | None, prompt_tokens: int, completion_tok
         return 0.0
     input_rate, output_rate = pricing
     return round((prompt_tokens / 1_000_000 * input_rate) + (completion_tokens / 1_000_000 * output_rate), 6)
+
+
+def infer_llm_provider(model_name: str | None) -> str:
+    if not model_name:
+        return ""
+    lowered = model_name.strip().lower()
+    if "/" in lowered:
+        return lowered.split("/", 1)[0]
+    if lowered.startswith("gemini"):
+        return "gemini"
+    if lowered.startswith("gpt"):
+        return "openai"
+    if lowered.startswith("claude"):
+        return "anthropic"
+    return ""
+
+
+def has_llm_provider(provider_name: str) -> bool:
+    if not provider_name:
+        return False
+    env_key = LLM_PROVIDER_ENV_KEYS.get(provider_name)
+    if not env_key:
+        return True
+    return bool(os.environ.get(env_key, "").strip())
+
+
+def is_retryable_llm_error(exc: Exception) -> bool:
+    lowered = str(exc).lower()
+    return any(pattern in lowered for pattern in RETRYABLE_LLM_ERROR_PATTERNS)
+
+
+def choose_llm_fallback(model_name: str | None) -> str | None:
+    normalized_name = normalize_model_name(model_name)
+    if not normalized_name:
+        return None
+    for candidate in LLM_OVERLOAD_FALLBACKS.get(normalized_name, ()):
+        provider_name = infer_llm_provider(candidate)
+        if has_llm_provider(provider_name):
+            return candidate
+    return None
+
+
+def build_llm_retry_overrides(task_plan: list[dict[str, Any]]) -> dict[str, str]:
+    overrides: dict[str, str] = {}
+    for task in task_plan:
+        model_name = task.get("model_name")
+        fallback = choose_llm_fallback(model_name)
+        if not fallback:
+            continue
+        if normalize_model_name(fallback) == normalize_model_name(model_name):
+            continue
+        overrides[str(model_name)] = fallback
+    return overrides
+
+
+@contextmanager
+def temporary_llm_model_overrides(overrides: dict[str, str]):
+    original = os.environ.get("SALES_FACTORY_LLM_MODEL_OVERRIDES")
+    if overrides:
+        os.environ["SALES_FACTORY_LLM_MODEL_OVERRIDES"] = json.dumps(overrides, ensure_ascii=False)
+    else:
+        os.environ.pop("SALES_FACTORY_LLM_MODEL_OVERRIDES", None)
+    try:
+        yield
+    finally:
+        if original is None:
+            os.environ.pop("SALES_FACTORY_LLM_MODEL_OVERRIDES", None)
+        else:
+            os.environ["SALES_FACTORY_LLM_MODEL_OVERRIDES"] = original
 
 
 def resolve_python_executable() -> str:
@@ -174,6 +273,7 @@ def build_inputs(args: argparse.Namespace) -> dict[str, Any]:
         "target_country": args.target_country,
         "proposal_language": args.proposal_language,
         "currency": args.currency,
+        "onecation_proof_points": load_onecation_proof_points(),
         "alert_email_to": args.notify_email,
         "test_mode": args.test_mode,
         "auto_mode": strategy_snapshot["auto_mode"],
@@ -770,122 +870,154 @@ def run_managed(args: argparse.Namespace) -> str:
         },
     )
 
-    try:
-        sales_factory = SalesFactory()
-        crew = sales_factory.crew()
-    except Exception as exc:
-        update_run(
-            run_id,
-            status="failed",
-            finished_at=now_iso(),
-            last_heartbeat_at=now_iso(),
-            error_message=f"Crew init failed: {exc}",
-        )
-        raise
-
-    crew.tasks = [task for task in crew.tasks if task.name != "notion_logging_task"]
-    task_plan = parse_task_plan(crew)
-    register_tasks(run_id, task_plan)
-
     _country = args.target_country or "-"
     _mode = "[테스트]" if args.test_mode else "[실제]"
     send_slack_message(
         f"🚀 {_mode} 파이프라인 시작 | 국가: {_country} | 최대 {args.max_companies}개 기업 | ID: {run_id[:8]}"
     )
 
-    if task_plan:
-        first = task_plan[0]
-        update_task(run_id, first["task_name"], status="running", started_at=now_iso())
-        update_run(run_id, current_task=first["task_name"], current_agent=first["agent_role"])
-
-    task_lookup = {item["task_name"]: item for item in task_plan}
-    task_sequence = [item["task_name"] for item in task_plan]
     stop_event = threading.Event()
 
     def heartbeat() -> None:
         while not stop_event.wait(5):
             update_run(run_id, last_heartbeat_at=now_iso())
 
-    def handle_task_callback(task_output: Any) -> None:
-        task_name = getattr(task_output, "name", None)
-        if not task_name and task_sequence:
-            pending = list_pending_tasks(run_id)
-            if pending:
-                task_name = pending[0]["task_name"]
-        if not task_name:
-            return
-        task_row = task_lookup.get(task_name, {})
-        task_obj = next((task for task in crew.tasks if task.name == task_name), None)
-        agent = getattr(task_obj, "agent", None)
-        llm = getattr(agent, "llm", None)
-        output_path = ""
-        if task_obj and getattr(task_obj, "output_file", None):
-            output_path = str(workspace_dir / task_obj.output_file)
-        raw_text = getattr(task_output, "raw", "") or ""
-        materialize_task_output_snapshot(output_path, raw_text)
+    def build_task_callback(current_crew: Any, task_lookup: dict[str, Any], task_sequence: list[str]):
+        def handle_task_callback(task_output: Any) -> None:
+            task_name = getattr(task_output, "name", None)
+            if not task_name and task_sequence:
+                pending = list_pending_tasks(run_id)
+                if pending:
+                    task_name = pending[0]["task_name"]
+            if not task_name:
+                return
+            task_row = task_lookup.get(task_name, {})
+            task_obj = next((task for task in current_crew.tasks if task.name == task_name), None)
+            agent = getattr(task_obj, "agent", None)
+            llm = getattr(agent, "llm", None)
+            output_path = ""
+            if task_obj and getattr(task_obj, "output_file", None):
+                output_path = str(workspace_dir / task_obj.output_file)
+            raw_text = getattr(task_output, "raw", "") or ""
+            materialize_task_output_snapshot(output_path, raw_text)
 
-        if task_name == "identity_disambiguation_task":
-            validate_identity_disambiguation_output(
-                workspace_dir,
-                lead_mode=str(inputs.get("lead_mode", "region_or_industry") or "region_or_industry"),
-            )
-        if task_name == "lead_verification_task":
-            raw_rows, retained_rows = sanitize_lead_verification_output(workspace_dir)
-            if raw_rows and retained_rows == 0:
-                raise RuntimeError("Lead verification rejected every company. Manual review is required before proposal generation.")
+            if task_name == "identity_disambiguation_task":
+                validate_identity_disambiguation_output(
+                    workspace_dir,
+                    lead_mode=str(inputs.get("lead_mode", "region_or_industry") or "region_or_industry"),
+                )
+            if task_name == "lead_verification_task":
+                raw_rows, retained_rows = sanitize_lead_verification_output(workspace_dir)
+                if raw_rows and retained_rows == 0:
+                    raise RuntimeError("Lead verification rejected every company. Manual review is required before proposal generation.")
 
-        usage = llm.get_token_usage_summary() if llm and hasattr(llm, "get_token_usage_summary") else None
-        prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
-        completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
-        total_tokens = int(getattr(usage, "total_tokens", 0) or 0)
-        model_name = task_row.get("model_name")
-        estimated_cost = estimate_cost_usd(model_name, prompt_tokens, completion_tokens)
-        update_task(
-            run_id,
-            task_name,
-            status="completed",
-            finished_at=now_iso(),
-            summary=getattr(task_output, "summary", "") or task_name,
-            excerpt=raw_text[:1500],
-            output_path=output_path,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            total_tokens=total_tokens,
-            estimated_cost_usd=estimated_cost,
-        )
-
-        next_task_name = None
-        next_agent_role = None
-        for idx, known_name in enumerate(task_sequence):
-            if known_name != task_name:
-                continue
-            if idx + 1 < len(task_sequence):
-                next_task_name = task_sequence[idx + 1]
-                next_agent_role = task_lookup[next_task_name].get("agent_role")
-            break
-
-        if next_task_name:
+            usage = llm.get_token_usage_summary() if llm and hasattr(llm, "get_token_usage_summary") else None
+            prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+            completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+            total_tokens = int(getattr(usage, "total_tokens", 0) or 0)
+            model_name = task_row.get("model_name")
+            estimated_cost = estimate_cost_usd(model_name, prompt_tokens, completion_tokens)
             update_task(
                 run_id,
-                next_task_name,
-                status="running",
-                started_at=now_iso(),
+                task_name,
+                status="completed",
+                finished_at=now_iso(),
+                summary=getattr(task_output, "summary", "") or task_name,
+                excerpt=raw_text[:1500],
+                output_path=output_path,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
+                estimated_cost_usd=estimated_cost,
             )
 
-        update_run(
-            run_id,
-            current_task=next_task_name,
-            current_agent=next_agent_role,
-            last_heartbeat_at=now_iso(),
-        )
+            next_task_name = None
+            next_agent_role = None
+            for idx, known_name in enumerate(task_sequence):
+                if known_name != task_name:
+                    continue
+                if idx + 1 < len(task_sequence):
+                    next_task_name = task_sequence[idx + 1]
+                    next_agent_role = task_lookup[next_task_name].get("agent_role")
+                break
 
-    crew.task_callback = handle_task_callback
+            if next_task_name:
+                update_task(
+                    run_id,
+                    next_task_name,
+                    status="running",
+                    started_at=now_iso(),
+                )
+
+            update_run(
+                run_id,
+                current_task=next_task_name,
+                current_agent=next_agent_role,
+                last_heartbeat_at=now_iso(),
+            )
+
+        return handle_task_callback
+
+    def prepare_crew_for_attempt(model_overrides: dict[str, str]) -> tuple[Any, list[dict[str, Any]]]:
+        with temporary_llm_model_overrides(model_overrides):
+            sales_factory = SalesFactory()
+            crew = sales_factory.crew()
+        crew.tasks = [task for task in crew.tasks if task.name != "notion_logging_task"]
+        task_plan = parse_task_plan(crew)
+        register_tasks(run_id, task_plan)
+        if task_plan:
+            first = task_plan[0]
+            update_task(run_id, first["task_name"], status="running", started_at=now_iso())
+            update_run(
+                run_id,
+                current_task=first["task_name"],
+                current_agent=first["agent_role"],
+                last_heartbeat_at=now_iso(),
+            )
+        task_lookup = {item["task_name"]: item for item in task_plan}
+        task_sequence = [item["task_name"] for item in task_plan]
+        crew.task_callback = build_task_callback(crew, task_lookup, task_sequence)
+        return crew, task_plan
+
     heartbeat_thread = threading.Thread(target=heartbeat, daemon=True)
     heartbeat_thread.start()
 
     try:
-        with working_directory(workspace_dir):
-            result = crew.kickoff(inputs=inputs)
+        result = None
+        retry_overrides: dict[str, str] = {}
+        for attempt in range(LLM_RETRY_ATTEMPTS):
+            task_plan: list[dict[str, Any]] = []
+            try:
+                crew, task_plan = prepare_crew_for_attempt(retry_overrides)
+                with working_directory(workspace_dir):
+                    result = crew.kickoff(inputs=inputs)
+                break
+            except Exception as exc:
+                if attempt >= LLM_RETRY_ATTEMPTS - 1 or not is_retryable_llm_error(exc):
+                    raise
+                next_overrides = build_llm_retry_overrides(task_plan)
+                if not next_overrides:
+                    raise
+                delay_seconds = LLM_RETRY_BASE_DELAY_SECONDS * (2**attempt)
+                record_notification(
+                    run_id,
+                    "llm_retry",
+                    "retrying",
+                    f"Retrying transient LLM failure ({attempt + 2}/{LLM_RETRY_ATTEMPTS})",
+                    "",
+                    {
+                        "attempt": attempt + 2,
+                        "max_attempts": LLM_RETRY_ATTEMPTS,
+                        "delay_seconds": delay_seconds,
+                        "error": str(exc)[:500],
+                        "model_overrides": next_overrides,
+                    },
+                )
+                time.sleep(delay_seconds)
+                retry_overrides = next_overrides
+
+        if result is None:
+            raise RuntimeError("Managed run ended without a crew result.")
         validate_identity_disambiguation_output(
             workspace_dir,
             lead_mode=str(inputs.get("lead_mode", "region_or_industry") or "region_or_industry"),

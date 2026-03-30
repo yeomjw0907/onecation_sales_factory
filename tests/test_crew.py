@@ -30,6 +30,19 @@ class CrewFallbackTests(unittest.TestCase):
                     "gemini/gemini-2.5-pro",
                 )
 
+    def test_runtime_model_override_applies_before_provider_checks(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "SALES_FACTORY_LLM_MODEL_OVERRIDES": '{"gemini-2.5-pro":"gemini/gemini-2.5-flash"}',
+            },
+            clear=False,
+        ):
+            self.assertEqual(
+                resolve_llm_model("gemini/gemini-2.5-pro"),
+                "gemini/gemini-2.5-flash",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

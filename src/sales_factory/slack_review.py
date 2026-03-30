@@ -18,6 +18,7 @@ from sales_factory.runtime_notifications import load_env_file
 APP_URL_FALLBACK = "https://onecation-sales-factory.onrender.com"
 _SOCKET_MODE_LOCK = threading.Lock()
 _SOCKET_MODE_STARTED = False
+_SOCKET_MODE_THREAD: threading.Thread | None = None
 
 
 def parse_json_value(value: Any, fallback: Any) -> Any:
@@ -43,6 +44,14 @@ def slack_public_app_url() -> str:
 def slack_socket_mode_enabled() -> bool:
     load_env_file()
     return bool(os.environ.get("SLACK_BOT_TOKEN", "").strip() and os.environ.get("SLACK_APP_TOKEN", "").strip())
+
+
+def prime_slack_review_handlers() -> bool:
+    try:
+        return ensure_slack_socket_mode_started()
+    except Exception as exc:
+        print(f"[slack] failed to prime socket mode: {exc}")
+        return False
 
 
 def build_review_ready_slack_blocks(
@@ -222,10 +231,13 @@ def _build_preview_modal(item: dict[str, Any]) -> dict[str, Any]:
 
 
 def ensure_slack_socket_mode_started() -> bool:
-    global _SOCKET_MODE_STARTED
+    global _SOCKET_MODE_STARTED, _SOCKET_MODE_THREAD
 
-    if _SOCKET_MODE_STARTED:
+    if _SOCKET_MODE_STARTED and _SOCKET_MODE_THREAD and _SOCKET_MODE_THREAD.is_alive():
         return True
+    if _SOCKET_MODE_THREAD and not _SOCKET_MODE_THREAD.is_alive():
+        _SOCKET_MODE_STARTED = False
+        _SOCKET_MODE_THREAD = None
 
     load_env_file()
     bot_token = os.environ.get("SLACK_BOT_TOKEN", "").strip()
@@ -234,8 +246,11 @@ def ensure_slack_socket_mode_started() -> bool:
         return False
 
     with _SOCKET_MODE_LOCK:
-        if _SOCKET_MODE_STARTED:
+        if _SOCKET_MODE_STARTED and _SOCKET_MODE_THREAD and _SOCKET_MODE_THREAD.is_alive():
             return True
+        if _SOCKET_MODE_THREAD and not _SOCKET_MODE_THREAD.is_alive():
+            _SOCKET_MODE_STARTED = False
+            _SOCKET_MODE_THREAD = None
 
         try:
             from slack_bolt import App
@@ -394,10 +409,25 @@ def ensure_slack_socket_mode_started() -> bool:
             )
 
         def _start() -> None:
-            handler = SocketModeHandler(app, app_token)
-            handler.start()
+            global _SOCKET_MODE_STARTED, _SOCKET_MODE_THREAD
+
+            try:
+                handler = SocketModeHandler(app, app_token)
+                handler.start()
+            except Exception as exc:
+                print(f"[slack] socket mode stopped: {exc}")
+            finally:
+                with _SOCKET_MODE_LOCK:
+                    _SOCKET_MODE_STARTED = False
+                    _SOCKET_MODE_THREAD = None
 
         thread = threading.Thread(target=_start, name="slack-socket-mode", daemon=True)
-        thread.start()
+        _SOCKET_MODE_THREAD = thread
         _SOCKET_MODE_STARTED = True
+        try:
+            thread.start()
+        except Exception:
+            _SOCKET_MODE_STARTED = False
+            _SOCKET_MODE_THREAD = None
+            raise
         return True

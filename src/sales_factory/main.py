@@ -15,6 +15,7 @@ try:
 except ImportError:
     pass
 
+from sales_factory.brand_proof import load_onecation_proof_points
 from sales_factory.crew import SalesFactory
 from sales_factory.output_validation import resolve_sender_name
 
@@ -73,6 +74,7 @@ def default_inputs() -> dict:
                     "max_companies": "15",
                     "current_year": str(datetime.now().year),
                     "sender_name": resolve_sender_name(),
+                    "onecation_proof_points": load_onecation_proof_points(project_root),
                 }
         except Exception as e:
             print(f"[업종 순환] industry_targets.json 읽기 실패: {e}")
@@ -84,6 +86,7 @@ def default_inputs() -> dict:
         "max_companies": "15",
         "current_year": str(datetime.now().year),
         "sender_name": resolve_sender_name(),
+        "onecation_proof_points": load_onecation_proof_points(project_root),
     }
 
 
@@ -152,6 +155,7 @@ def run_with_trigger():
         "max_companies": str(trigger_payload.get("max_companies", "10")),
         "current_year": str(datetime.now().year),
         "sender_name": trigger_payload.get("sender_name") or resolve_sender_name(),
+        "onecation_proof_points": trigger_payload.get("onecation_proof_points") or load_onecation_proof_points(),
     }
 
     try:

@@ -358,6 +358,13 @@ proposal_task:
     language such as "we could not fully verify the current site from our audit
     environment" or "the current web presence could not be reviewed reliably."
     Never leave placeholders such as [your name], [company], [city], or [contact name].
+    Approved Onecation proof points:
+    {onecation_proof_points}
+
+    Rules for ## Why Onecation:
+    - Use only approved proof points that appear above.
+    - If no approved named case studies or metrics are provided, do not invent them.
+    - Never fabricate client names, logos, conversion lifts, revenue lifts, years, or awards.
   expected_output: >
     For each prioritized company, create one H1 section:
     # Company Name
@@ -413,6 +420,9 @@ proposal_task:
     ## Why Onecation
     1 short paragraph plus 3-5 bullets on cross-border fit, execution strength,
     and relevant proof.
+    Use only approved proof points supplied in {onecation_proof_points}. If no
+    approved case studies are supplied, keep this section factual and general
+    instead of inventing client results or metrics.
 
     ## Suggested Next Step
     A concise numbered list with at most 3 steps.

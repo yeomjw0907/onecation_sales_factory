@@ -10,10 +10,14 @@ SRC_DIR = ROOT_DIR / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from sales_factory.slack_review import build_review_ready_slack_blocks
+from sales_factory.slack_review import build_review_ready_slack_blocks, prime_slack_review_handlers
 
 
 class SlackReviewTests(unittest.TestCase):
+    def test_prime_slack_review_handlers_swallows_startup_errors(self) -> None:
+        with patch("sales_factory.slack_review.ensure_slack_socket_mode_started", side_effect=RuntimeError("boom")):
+            self.assertFalse(prime_slack_review_handlers())
+
     def test_build_review_ready_slack_blocks_contains_review_actions(self) -> None:
         approval_item = {
             "id": "item-1",

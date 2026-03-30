@@ -28,6 +28,7 @@ from sales_factory.proposal_quality import evaluate_proposal_path, evaluate_prop
 from sales_factory.auto_delivery import build_primary_email_payload, get_auto_send_settings
 from sales_factory.runtime_assets import route_rejection
 from sales_factory.runtime_copilot import answer_ops_question
+from sales_factory.slack_review import prime_slack_review_handlers
 from sales_factory.runtime_db import (
     DB_PATH,
     PROJECT_ROOT,
@@ -498,6 +499,7 @@ def load_runtime() -> None:
     load_env_file()
     init_db()
     mark_stale_runs()
+    prime_slack_review_handlers()
 
 
 def query_running_run() -> dict[str, Any] | None:

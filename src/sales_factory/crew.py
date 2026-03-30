@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import os
 from copy import deepcopy
 from typing import Any, List
@@ -22,6 +23,23 @@ PROVIDER_FALLBACKS = {
 }
 
 
+def _load_runtime_model_overrides() -> dict[str, str]:
+    raw = os.environ.get("SALES_FACTORY_LLM_MODEL_OVERRIDES", "").strip()
+    if not raw:
+        return {}
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    return {
+        str(key).strip(): str(value).strip()
+        for key, value in payload.items()
+        if str(key).strip() and str(value).strip()
+    }
+
+
 def _has_provider(provider_name: str) -> bool:
     if provider_name == "anthropic":
         return importlib.util.find_spec("anthropic") is not None and bool(
@@ -31,7 +49,16 @@ def _has_provider(provider_name: str) -> bool:
 
 
 def resolve_llm_model(llm_name: str | None) -> str | None:
-    if not llm_name or "/" not in llm_name:
+    if not llm_name:
+        return llm_name
+
+    runtime_overrides = _load_runtime_model_overrides()
+    normalized_name = llm_name.split("/", 1)[1].strip() if "/" in llm_name else llm_name.strip()
+    override = runtime_overrides.get(llm_name) or runtime_overrides.get(normalized_name)
+    if override:
+        llm_name = override
+
+    if "/" not in llm_name:
         return llm_name
 
     provider_name = llm_name.split("/", 1)[0].strip().lower()
