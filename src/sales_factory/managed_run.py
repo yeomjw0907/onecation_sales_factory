@@ -59,8 +59,11 @@ MODEL_PRICING_USD_PER_MILLION: dict[str, tuple[float, float]] = {
     "gemini-2.5-pro": (1.25, 10.00),
     "gpt-4o": (5.00, 15.00),
     "gpt-4o-mini": (0.15, 0.60),
+    "claude-sonnet-4-5": (3.00, 15.00),
     "claude-sonnet-4-20250514": (3.00, 15.00),
     "claude-3-5-sonnet-20241022": (3.00, 15.00),
+    "claude-opus-4-5": (15.00, 75.00),
+    "claude-haiku-4-5": (0.80, 4.00),
 }
 
 ASSET_TYPE_LABELS = {
