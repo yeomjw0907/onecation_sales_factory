@@ -5,7 +5,10 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
+import traceback
+from types import SimpleNamespace
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -46,7 +49,12 @@ from sales_factory.runtime_db import (
     update_run,
 )
 from sales_factory.runtime_notifications import load_env_file, send_email_message
-from sales_factory.runtime_supabase import materialize_local_asset, read_asset_bytes, read_asset_text
+from sales_factory.runtime_supabase import (
+    is_render_environment,
+    materialize_local_asset,
+    read_asset_bytes,
+    read_asset_text,
+)
 from sales_factory.strategy_runtime import build_strategy_snapshot
 
 COUNTRIES = ["KR", "US", "JP", "TW", "SG", "CN", "AE"]
@@ -578,6 +586,39 @@ def launch_background_run(
     ]
     if test_mode:
         args.append("--test-mode")
+
+    if is_render_environment():
+        from sales_factory.managed_run import run_managed
+
+        run_args = SimpleNamespace(
+            trigger_source=trigger_source,
+            target_country=target_country,
+            lead_mode=lead_mode,
+            lead_query=lead_query,
+            max_companies=max_companies,
+            notify_email=notify_email,
+            proposal_language=defaults["proposal_language"],
+            currency=defaults["currency"],
+            test_mode=test_mode,
+        )
+
+        def _run_in_background() -> None:
+            with log_path.open("a", encoding="utf-8") as log_file:
+                log_file.write(f"[{datetime.now().isoformat(timespec='seconds')}] Render in-process run started\n")
+                try:
+                    run_managed(run_args)
+                    log_file.write(f"[{datetime.now().isoformat(timespec='seconds')}] Render in-process run finished\n")
+                except Exception:
+                    log_file.write(traceback.format_exc())
+                    log_file.flush()
+
+        thread = threading.Thread(
+            target=_run_in_background,
+            name=f"managed-run-{datetime.now().strftime('%H%M%S')}",
+            daemon=True,
+        )
+        thread.start()
+        return
 
     creationflags = 0
     if sys.platform == "win32":
