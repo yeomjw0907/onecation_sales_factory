@@ -490,7 +490,8 @@ email_outreach_task:
       - Never leave bracket placeholders such as [your name], [contact name], or [city].
       - Always use plain ASCII punctuation instead of smart quotes or typographic
         apostrophes.
-      - Open with a clear sender introduction such as "{sender_name} from Onecation".
+      - Use the exact sender name `{sender_name}` in the opening introduction.
+        For Korean, prefer "Onecation의 {sender_name}입니다." or an equally natural variant.
       - Lead with the company's own strengths, position, or current situation before
         naming competitors.
       - Use competitor references only as brief supporting context, not as the first
@@ -502,7 +503,7 @@ email_outreach_task:
     The first email should make it clear that real work was already done:
     review, diagnosis, competitor context, and tailored execution ideas.
     The primary email body must also include:
-    - a short opening sentence that identifies Onecation
+    - a short opening sentence that identifies Onecation and uses the exact sender name `{sender_name}`
     - a short, explicit offer sentence that says what we want to sell
     - a short, polite closing sentence before the CTA field
     If website access was uncertain, describe it as an audit verification issue,

@@ -16,6 +16,7 @@ except ImportError:
     pass
 
 from sales_factory.crew import SalesFactory
+from sales_factory.output_validation import resolve_sender_name
 
 warnings.filterwarnings("ignore", category=SyntaxWarning, module="pysbd")
 
@@ -71,6 +72,7 @@ def default_inputs() -> dict:
                     "lead_query": current["query"],
                     "max_companies": "15",
                     "current_year": str(datetime.now().year),
+                    "sender_name": resolve_sender_name(),
                 }
         except Exception as e:
             print(f"[업종 순환] industry_targets.json 읽기 실패: {e}")
@@ -81,6 +83,7 @@ def default_inputs() -> dict:
         "lead_query": "서울 소규모 자영업 홈페이지 없는 업체",
         "max_companies": "15",
         "current_year": str(datetime.now().year),
+        "sender_name": resolve_sender_name(),
     }
 
 
@@ -148,6 +151,7 @@ def run_with_trigger():
         "lead_query": trigger_payload.get("lead_query", ""),
         "max_companies": str(trigger_payload.get("max_companies", "10")),
         "current_year": str(datetime.now().year),
+        "sender_name": trigger_payload.get("sender_name") or resolve_sender_name(),
     }
 
     try:

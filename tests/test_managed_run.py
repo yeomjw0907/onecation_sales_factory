@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import argparse
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 SRC_DIR = ROOT_DIR / "src"
@@ -11,6 +13,7 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from sales_factory.managed_run import (
+    build_inputs,
     enforce_identity_disambiguation_guard,
     sanitize_identity_disambiguation_output,
     sanitize_lead_verification_output,
@@ -18,6 +21,23 @@ from sales_factory.managed_run import (
 
 
 class ManagedRunTests(unittest.TestCase):
+    def test_build_inputs_includes_sender_name(self) -> None:
+        args = argparse.Namespace(
+            target_country="KR",
+            lead_mode="region_or_industry",
+            lead_query="서울 인쇄 업체",
+            max_companies=2,
+            proposal_language="Korean",
+            currency="KRW",
+            notify_email="ops@onecation.co.kr",
+            test_mode=True,
+        )
+
+        with patch.dict("os.environ", {"SALES_FACTORY_SENDER_NAME": "염정원"}, clear=False):
+            inputs = build_inputs(args)
+
+        self.assertEqual(inputs["sender_name"], "염정원")
+
     def test_sanitize_identity_disambiguation_output_keeps_only_selected_rows(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace_dir = Path(temp_dir)

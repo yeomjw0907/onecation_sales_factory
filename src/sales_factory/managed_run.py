@@ -23,6 +23,7 @@ from sales_factory.auto_delivery import (
     get_auto_send_settings,
     load_verified_recipients,
 )
+from sales_factory.output_validation import resolve_sender_name
 from sales_factory.runtime_db import (
     PROJECT_ROOT,
     create_run,
@@ -168,6 +169,7 @@ def build_inputs(args: argparse.Namespace) -> dict[str, Any]:
         "lead_query_input": args.lead_query or "",
         "max_companies": str(args.max_companies or 1),
         "current_year": str(datetime.now().year),
+        "sender_name": resolve_sender_name(),
         "target_country": args.target_country,
         "proposal_language": args.proposal_language,
         "currency": args.currency,
