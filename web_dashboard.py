@@ -1693,7 +1693,8 @@ def main() -> None:
 
         if running_run:
             st.warning(
-                f"실행 중: {running_run['id'][:8]} | {display_task_name(running_run.get('current_task'))}"
+                f"실행 중 (4초마다 자동 갱신)\n\n"
+                f"ID: `{running_run['id'][:8]}` | 현재: {display_task_name(running_run.get('current_task'))}"
             )
 
         if st.button("시작", type="primary", use_container_width=True):
@@ -1710,7 +1711,7 @@ def main() -> None:
                     notify_email=notify_email.strip(),
                     test_mode=test_mode,
                 )
-                st.success("백그라운드에서 실행을 시작했습니다.")
+                set_ui_notice("success", "실행을 시작했습니다. 실행 현황 탭에서 진행 상태를 확인하세요.")
                 st.rerun()
 
         if st.button("새로고침", use_container_width=True):
@@ -1772,7 +1773,10 @@ def main() -> None:
         render_settings()
 
     if running_run:
-        time.sleep(5)
+        time.sleep(4)
+        st.rerun()
+    elif latest_run and latest_run.get("status") in {"waiting_approval"}:
+        time.sleep(8)
         st.rerun()
 
 
