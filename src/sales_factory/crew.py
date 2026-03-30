@@ -38,6 +38,22 @@ class SalesFactory:
         )
 
     @agent
+    def lead_verifier(self) -> Agent:
+        tools = [_scrape_tool] if _scrape_tool else []
+        return Agent(
+            config=self.agents_config["lead_verifier"],  # type: ignore[index]
+            tools=[t for t in tools if t is not None],
+            verbose=True,
+        )
+
+    @agent
+    def identity_disambiguator(self) -> Agent:
+        return Agent(
+            config=self.agents_config["identity_disambiguator"],  # type: ignore[index]
+            verbose=True,
+        )
+
+    @agent
     def competitor_analyst(self) -> Agent:
         tools = [_scrape_tool] if _scrape_tool else []
         return Agent(
@@ -68,9 +84,23 @@ class SalesFactory:
         )
 
     @agent
+    def proposal_localizer(self) -> Agent:
+        return Agent(
+            config=self.agents_config["proposal_localizer"],  # type: ignore[index]
+            verbose=True,
+        )
+
+    @agent
     def email_writer(self) -> Agent:
         return Agent(
             config=self.agents_config["email_writer"],  # type: ignore[index]
+            verbose=True,
+        )
+
+    @agent
+    def email_localizer(self) -> Agent:
+        return Agent(
+            config=self.agents_config["email_localizer"],  # type: ignore[index]
             verbose=True,
         )
 
@@ -88,6 +118,22 @@ class SalesFactory:
             name="lead_research_task",
             config=self.tasks_config["lead_research_task"],  # type: ignore[index]
             output_file="lead_research.md",
+        )
+
+    @task
+    def identity_disambiguation_task(self) -> Task:
+        return Task(
+            name="identity_disambiguation_task",
+            config=self.tasks_config["identity_disambiguation_task"],  # type: ignore[index]
+            output_file="identity_disambiguation.md",
+        )
+
+    @task
+    def lead_verification_task(self) -> Task:
+        return Task(
+            name="lead_verification_task",
+            config=self.tasks_config["lead_verification_task"],  # type: ignore[index]
+            output_file="lead_verification.md",
         )
 
     @task
@@ -127,6 +173,14 @@ class SalesFactory:
         return Task(
             name="proposal_task",
             config=self.tasks_config["proposal_task"],  # type: ignore[index]
+            output_file="proposal_canonical.md",
+        )
+
+    @task
+    def proposal_localization_task(self) -> Task:
+        return Task(
+            name="proposal_localization_task",
+            config=self.tasks_config["proposal_localization_task"],  # type: ignore[index]
             output_file="proposal.md",
         )
 
@@ -135,6 +189,14 @@ class SalesFactory:
         return Task(
             name="email_outreach_task",
             config=self.tasks_config["email_outreach_task"],  # type: ignore[index]
+            output_file="outreach_emails_canonical.md",
+        )
+
+    @task
+    def email_localization_task(self) -> Task:
+        return Task(
+            name="email_localization_task",
+            config=self.tasks_config["email_localization_task"],  # type: ignore[index]
             output_file="outreach_emails.md",
         )
 

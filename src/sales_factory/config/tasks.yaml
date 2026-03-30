@@ -6,7 +6,12 @@ lead_research_task:
     Lead mode: {lead_mode}
 
     If lead_mode is "company_name", treat lead_query as one exact company and
-    return that company only if you can gather enough reliable public evidence.
+    search for exact legal-name matches first. If multiple companies share that
+    exact name, return the distinct candidates you found instead of silently
+    guessing which one is correct.
+    Return an exact-name candidate only if you can gather enough reliable public evidence.
+    Do not substitute a similar company, different brand, or partial match.
+    If the exact company cannot be verified, return zero rows.
     If lead_mode is "region_or_industry", find up to {max_companies} companies
     that match the requested market.
 
@@ -32,12 +37,92 @@ lead_research_task:
     - Do not invent contact details.
     - Keep source_links and public_profile_links useful and concrete.
     - icp_notes must briefly explain why the company is or is not worth pursuing.
+    - Never swap in a different company when lead_mode is "company_name".
+    - If multiple exact-name companies exist, include each distinct candidate row
+      you can verify, up to 3 rows, so downstream disambiguation can choose safely.
   agent: lead_finder
+
+identity_disambiguation_task:
+  description: >
+    Review lead_research_task and resolve exact-company identity before any
+    verification or proposal work continues.
+
+    Rules:
+    - If lead_mode is "company_name", compare same-name candidates using
+      homepage domain, official address, city/state/country, phone number,
+      email domain, and public profile consistency.
+    - Never guess between same-name companies.
+    - If one candidate is clearly supported by coherent evidence, keep only
+      that row and mark it selected.
+    - If multiple candidates remain plausible, or the evidence is internally
+      inconsistent, return zero retained rows.
+    - If lead_mode is "region_or_industry", pass through each coherent company
+      as selected; reject only rows with obvious identity conflicts.
+    - Prefer a false negative over a false positive.
+  expected_output: >
+    First line must be exactly: TOTAL_COMPANIES: N
+    where N is the number of rows retained after disambiguation.
+
+    Then output one markdown table with exactly N rows and these columns:
+    company_name | industry | location | contact_email_or_phone | homepage_url_if_any |
+    public_profile_links | source_links | company_size_estimate | revenue_estimate |
+    sub_industry | decision_maker_hint | icp_fit | icp_notes | current_digital_presence |
+    official_address | official_phone | official_email_domain | identity_confidence |
+    identity_match_basis | conflict_notes | disambiguation_status
+
+    disambiguation_status must be one of:
+    selected | ambiguous | rejected
+
+    Retained rows must only use selected.
+    identity_confidence must be one of:
+    high | medium | low
+  agent: identity_disambiguator
+  context:
+    - lead_research_task
+
+lead_verification_task:
+  description: >
+    Verify every row from identity_disambiguation_task before any audit or proposal work
+    happens. Your job is to confirm that the company identity, official website,
+    and public evidence actually belong together.
+
+    Rules:
+    - Treat identity_disambiguation_task as a draft, not as ground truth.
+    - Correct wrong homepage URLs, wrong legal names, and mismatched public links.
+    - If lead_mode is "company_name", only keep the exact intended company.
+    - Do not mark a company rejected only because its website is down, inaccessible,
+      or has DNS/TLS issues when the company identity is otherwise supported by
+      reliable public evidence.
+    - If a row cannot be tied to reliable public evidence, mark it rejected.
+    - If a company appears to have no official website, leave homepage_url_if_any blank
+      and explain why in verification_notes.
+    - Never invent a website just to fill the field.
+  expected_output: >
+    First line must be exactly: TOTAL_COMPANIES: N
+    where N is the exact number of rows retained after verification.
+
+    Then output one markdown table with exactly N rows and these columns:
+    company_name | industry | location | contact_email_or_phone | homepage_url_if_any |
+    public_profile_links | source_links | company_size_estimate | revenue_estimate |
+    sub_industry | decision_maker_hint | icp_fit | icp_notes | current_digital_presence |
+    verification_status | verification_notes
+
+    verification_status must be one of:
+    verified | corrected | rejected
+
+    Retained rows must only use verified or corrected.
+    If a row is rejected, do not include it in the retained table.
+  agent: lead_verifier
+  context:
+    - identity_disambiguation_task
 
 website_audit_task:
   description: >
-    Audit every company from lead_research_task. When a homepage URL exists,
-    scrape the website and compare what is on the official site with public
+    Audit every verified company from lead_verification_task. Use the corrected
+    homepage_url_if_any, verified location, and verification_notes there as the
+    authoritative inputs. Never infer a different city, state, or metro area
+    than the one already verified upstream.
+    When a homepage URL exists, scrape the website and compare what is on the official site with public
     information from directories, listings, and public profiles.
 
     Classify each company into one of these buckets:
@@ -63,12 +148,16 @@ website_audit_task:
 
     Prioritize companies in no_website, outdated_website, or inconsistent_website
     when the evidence suggests a credible sales opportunity.
+    If a plausible official URL exists but the site is unreachable from the current
+    audit environment due to timeout, DNS, TLS, or connection errors, do not call
+    it no_website. Use inconsistent_website and explain that access could not be
+    verified from the current audit environment.
   expected_output: >
     First line must be exactly: TOTAL_COMPANIES: N
     where N matches the number of companies audited.
 
     Then output one markdown table with exactly N rows and these columns:
-    company_name | website_bucket | key_evidence | mismatch_summary |
+    company_name | location | homepage_url_if_any | website_bucket | key_evidence | mismatch_summary |
     website_urgency_score | market_fit_score | reachability_score |
     execution_readiness_score | priority_score | action_bucket | recommended_offer_type
 
@@ -78,7 +167,7 @@ website_audit_task:
     key_evidence and mismatch_summary must be concrete, short, and evidence-based.
   agent: website_auditor
   context:
-    - lead_research_task
+    - lead_verification_task
 
 competitor_analysis_task:
   description: >
@@ -92,6 +181,10 @@ competitor_analysis_task:
     every market. Explain what matters in the target country, including where
     trust seems to come from and which digital or commercial motions appear to
     matter most.
+    Treat the verified location from website_audit_task as authoritative.
+    Never introduce a different city, state, metro area, or competitor set
+    from another region. If local geography is uncertain, say "the local market"
+    instead of naming a region you cannot verify.
 
     For each company, derive:
     - market_snapshot
@@ -188,6 +281,11 @@ marketing_recommendation_task:
 
     Tie the answer to the target country, the website bucket, and the realistic
     buying behavior of that market.
+    Treat the verified location from website_audit_task as authoritative.
+    Never introduce a different city, state, or metro area than the one already
+    verified upstream.
+    Never leave placeholders such as [city], [country], [company], or [contact name].
+    If a specific detail is unknown, rewrite the sentence without a placeholder.
   expected_output: >
     For each prioritized company, create one H1 section:
     # Company Name
@@ -218,16 +316,20 @@ marketing_recommendation_task:
 
 proposal_task:
   description: >
-    Write a client-facing proposal in {proposal_language} for each prioritized
-    company. This proposal is intended to be strong enough for the first outbound
-    touch. It should feel like it was written by a senior salesperson and
-    strategist who studied the company, the market, and the opportunity.
+    Write the canonical proposal draft in English for each prioritized company.
+    This is the source-of-truth draft that will later be localized into
+    {proposal_language}. It must be strong enough that a senior sales localizer
+    can translate it without changing the business logic.
 
     Use {currency} for pricing guidance.
     The proposal must be polite, specific, and commercially sharp. Include a
     short greeting near the front and a short thank-you closing at the end.
-    When writing in English, prefer plain ASCII punctuation instead of smart
-    quotes or typographic apostrophes.
+    Always use plain ASCII punctuation instead of smart quotes or typographic
+    apostrophes.
+    Treat the verified location from upstream research as authoritative.
+    Never introduce a different city, state, metro area, or local competitor
+    set from another region. If local geography is uncertain, write "your local
+    market" instead of guessing.
 
     This is not a generic marketing report. It must:
     - identify the company's current digital state
@@ -248,6 +350,14 @@ proposal_task:
     content, or a combination. Do not force the same channels on every company.
 
     If reliable data is missing, say so clearly instead of inventing certainty.
+    If website access could not be verified from the current audit environment,
+    say that explicitly instead of claiming the company has no website as a fact.
+    Never cite raw audit-environment error strings such as DNS, TLS, name
+    resolution, getaddrinfo, timeout, connection refused, or browser error-page
+    wording in customer-facing copy. Rewrite those situations in business
+    language such as "we could not fully verify the current site from our audit
+    environment" or "the current web presence could not be reviewed reliably."
+    Never leave placeholders such as [your name], [company], [city], or [contact name].
   expected_output: >
     For each prioritized company, create one H1 section:
     # Company Name
@@ -314,11 +424,51 @@ proposal_task:
     - landing_page_task
     - marketing_recommendation_task
 
+proposal_localization_task:
+  description: >
+    Localize proposal_task into {proposal_language} for each prioritized
+    company. You are producing the final customer-facing proposal content that
+    will be rendered into Word and PDF.
+
+    Rules:
+    - Preserve the exact H1 company name from proposal_task.
+    - Preserve every `##` section heading from proposal_task exactly in English.
+      These headings are pipeline control markers and must not change.
+    - Translate all customer-facing prose, bullet text, numbered steps, and
+      table cell content into {proposal_language}.
+      - Keep numbers, package structure, commercial intent, and facts aligned with
+        the canonical draft.
+      - Keep geography aligned with the verified upstream location. Do not swap
+        in another city, state, metro area, or competitor region.
+      - Do not add or remove sections.
+    - Do not leave placeholders such as [your name], [company], [city], or
+      [contact name].
+    - If website access was uncertain, describe it as an audit verification
+      issue instead of claiming the company has no website as a hard fact.
+    - Do not mention DNS, TLS, getaddrinfo, timeout, connection refused, or
+      raw browser/network errors in customer-facing copy. Rewrite them into
+      neutral business language about incomplete audit verification.
+    - Keep Onecation and the exact company name unchanged.
+    - When the target language is English, lightly polish proposal_task but keep
+      the same structure and business meaning.
+  expected_output: >
+    Reproduce the exact company-by-company markdown structure from proposal_task:
+    - the same `# Company Name` sections
+    - the same `##` section headings in the same order
+    - the same overall table and list structure
+
+    Only localize customer-facing content under those headings.
+  agent: proposal_localizer
+  context:
+    - proposal_task
+
 email_outreach_task:
   description: >
-    Write outbound emails in {proposal_language} for each prioritized company.
-    Assume the full proposal document and PDF are attached in the first touch.
-    The first email should feel researched and substantial, not teaser-only.
+    Write the canonical outbound email sequence in English for each prioritized
+    company. This is the source draft that will later be localized into
+    {proposal_language}. Assume the full proposal document and PDF are attached
+    in the first touch. The first email should feel researched and substantial,
+    not teaser-only.
 
     Every company's sequence must include:
     - one primary outbound email (day 1) that references the attached proposal
@@ -331,12 +481,21 @@ email_outreach_task:
     - State one concrete way Onecation would help.
     - Use one clear CTA only.
     - Keep the tone respectful and professional.
-    - Avoid generic praise and template filler.
-    - When writing in English, prefer plain ASCII punctuation instead of smart
-      quotes or typographic apostrophes.
+      - Avoid generic praise and template filler.
+      - Keep all local references aligned with the verified upstream location.
+        Never swap in a different city, state, metro area, or competitor region.
+      - Never leave bracket placeholders such as [your name], [contact name], or [city].
+      - Always use plain ASCII punctuation instead of smart quotes or typographic
+        apostrophes.
 
     The first email should make it clear that real work was already done:
     review, diagnosis, competitor context, and tailored execution ideas.
+    If website access was uncertain, describe it as an audit verification issue,
+    not as a hard factual claim that the company has no website.
+    Never cite raw audit-environment error strings such as DNS, TLS, name
+    resolution, getaddrinfo, timeout, connection refused, or browser error-page
+    wording in customer-facing copy. Rewrite them into neutral language about
+    incomplete verification of the current web presence.
   expected_output: >
     For each prioritized company, create one H1 section:
     # Company Name
@@ -373,6 +532,48 @@ email_outreach_task:
     - competitor_analysis_task
     - marketing_recommendation_task
 
+email_localization_task:
+  description: >
+    Localize email_outreach_task into {proposal_language}. This is the final
+    send-ready sequence that internal tools will parse.
+
+    Rules:
+    - Preserve the exact H1 company name from email_outreach_task.
+    - Preserve the exact `##` section headings:
+      `## Primary Outbound Email`, `## Follow Up 1`, `## Follow Up 2`,
+      and `## Personalization Notes`.
+    - Preserve the exact field keys `subject`, `preview_line`, `body`, and `cta`
+      in English.
+      - Translate only the customer-facing values into {proposal_language}.
+      - Keep company-specific facts, CTA intent, and offer direction aligned with
+        the canonical English draft and the localized proposal.
+      - Keep geography aligned with the verified upstream location. Do not swap
+        in a different city, state, metro area, or competitor region.
+      - Do not leave placeholders such as [your name], [contact name], or [city].
+    - Never leave placeholders for previous-send dates. If an exact prior send
+      date is unknown, rewrite naturally as "earlier", "previously", or the
+      equivalent in {proposal_language} with no brackets.
+    - If website access was uncertain, describe it as an audit verification
+      issue instead of a hard factual no-website claim.
+    - Do not mention DNS, TLS, getaddrinfo, timeout, connection refused, or
+      raw browser/network errors in customer-facing copy. Rewrite them into
+      neutral language about incomplete audit verification.
+    - Keep Onecation and the exact company name unchanged.
+    - When the target language is English, lightly polish email_outreach_task
+      but keep the same structure and meaning.
+  expected_output: >
+    Reproduce the exact company-by-company markdown structure from
+    email_outreach_task:
+    - the same `# Company Name` sections
+    - the same `##` headings in the same order
+    - the same field keys
+
+    Only localize the customer-facing values.
+  agent: email_localizer
+  context:
+    - email_outreach_task
+    - proposal_localization_task
+
 notion_logging_task:
   description: >
     Log one CRM row or page per company only when CRM sync is enabled and the
@@ -386,8 +587,8 @@ notion_logging_task:
     recommended_offer_type | target_country | next_step | proposal_ready | email_ready
   agent: notion_logger
   context:
-    - lead_research_task
+    - lead_verification_task
     - website_audit_task
     - marketing_recommendation_task
-    - proposal_task
-    - email_outreach_task
+    - proposal_localization_task
+    - email_localization_task

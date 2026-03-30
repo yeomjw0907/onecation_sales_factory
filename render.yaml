@@ -1,0 +1,36 @@
+services:
+  - type: web
+    name: onecation-sales-factory
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    autoDeploy: true
+    healthCheckPath: /
+    envVars:
+      - key: PYTHONPATH
+        value: /app/src
+      - key: STREAMLIT_BROWSER_GATHER_USAGE_STATS
+        value: "false"
+      - key: SALES_FACTORY_RUNTIME_BACKEND
+        value: supabase
+      - key: SALES_FACTORY_REQUIRE_PDF
+        value: "1"
+      - key: LIBREOFFICE_BIN
+        value: /usr/bin/soffice
+      - key: SUPABASE_STORAGE_BUCKET
+        value: sales-factory-assets
+      - key: SALES_FACTORY_AUTO_SEND_MODE
+        value: shadow
+      - key: SALES_FACTORY_AUTO_SEND_MIN_PROPOSAL_SCORE
+        value: "85"
+      - key: SALES_FACTORY_AUTO_SEND_REQUIRE_PDF
+        value: "1"
+      - key: SALES_FACTORY_AUTO_SEND_MAX_ITEMS_PER_RUN
+        value: "1"
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SECRET_KEY
+        sync: false
+      - key: ALERT_EMAIL_TO
+        sync: false

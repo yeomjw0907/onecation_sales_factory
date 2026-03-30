@@ -23,6 +23,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 RUNTIME_DIR = PROJECT_ROOT / ".runtime"
 DB_PATH = RUNTIME_DIR / "operations.db"
 ASSET_ROOT = RUNTIME_DIR / "assets"
+WORKSPACE_ROOT = RUNTIME_DIR / "workspaces"
 
 
 def now_iso() -> str:
@@ -32,6 +33,15 @@ def now_iso() -> str:
 def ensure_runtime_dirs() -> None:
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     ASSET_ROOT.mkdir(parents=True, exist_ok=True)
+    WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True)
+
+
+def get_run_workspace(run_id: str) -> Path:
+    return WORKSPACE_ROOT / run_id
+
+
+def get_run_output_dir(run_id: str) -> Path:
+    return get_run_workspace(run_id) / "output"
 
 
 def get_connection() -> sqlite3.Connection:

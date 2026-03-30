@@ -1,0 +1,9 @@
+.git
+.venv
+.runtime
+.claude
+__pycache__
+*.pyc
+output
+output2
+logs

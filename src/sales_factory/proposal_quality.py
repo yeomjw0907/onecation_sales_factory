@@ -22,6 +22,18 @@ REQUIRED_HEADINGS: list[tuple[str, int]] = [
 ]
 
 
+def normalize_heading(text: str) -> str:
+    normalized = re.sub(r"\s+", " ", text.strip()).lower()
+    return normalized
+
+
+def collect_h2_headings(text: str) -> set[str]:
+    return {
+        normalize_heading(match.group(1))
+        for match in re.finditer(r"^##\s+(.+?)\s*$", text, flags=re.MULTILINE)
+    }
+
+
 def _label(score: int) -> str:
     if score >= 85:
         return "강함"
@@ -35,12 +47,14 @@ def _label(score: int) -> str:
 def evaluate_proposal_text(text: str) -> dict[str, Any]:
     score = 0
     missing_sections: list[str] = []
+    detected_h2 = collect_h2_headings(text)
 
     for heading, weight in REQUIRED_HEADINGS:
-        if heading in text:
+        heading_text = heading.replace("## ", "", 1)
+        if normalize_heading(heading_text) in detected_h2:
             score += weight
         else:
-            missing_sections.append(heading.replace("## ", ""))
+            missing_sections.append(heading_text)
 
     table_count = len(re.findall(r"^\|.+\|$", text, flags=re.MULTILINE))
     bullet_count = len(re.findall(r"^\s*[-*]\s+", text, flags=re.MULTILINE))

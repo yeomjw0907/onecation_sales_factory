@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 import json
+import os
 import subprocess
 import sys
 import warnings
@@ -27,8 +28,12 @@ def run_notion_postprocess() -> None:
     # 1단계: 제안서 PDF 생성
     pdf_script = project_root / "generate_pdf_playwright.py"
     if pdf_script.exists():
+        command = [sys.executable, str(pdf_script)]
+        require_pdf = os.environ.get("SALES_FACTORY_REQUIRE_PDF", "").strip().lower() in {"1", "true", "yes"}
+        if require_pdf:
+            command.append("--require-pdf")
         subprocess.run(
-            [sys.executable, str(pdf_script)],
+            command,
             cwd=str(project_root),
             check=False,
         )

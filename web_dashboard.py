@@ -21,6 +21,7 @@ except ImportError:
     sys.exit(1)
 
 from sales_factory.proposal_quality import evaluate_proposal_path, evaluate_proposal_text
+from sales_factory.auto_delivery import get_auto_send_settings
 from sales_factory.runtime_assets import route_rejection
 from sales_factory.runtime_copilot import answer_ops_question
 from sales_factory.runtime_db import (
@@ -105,23 +106,32 @@ RUN_STATUS_LABELS = {
     "running": "실행 중",
     "waiting_approval": "검토 대기",
     "completed": "완료",
+    "auto_sent": "자동 발송됨",
     "failed": "실패",
     "approved": "승인됨",
     "rejected": "반려됨",
     "pending": "대기 중",
+    "simulated": "시뮬레이션",
+    "blocked": "차단됨",
+    "sent": "발송됨",
 }
 TASK_NAME_LABELS = {
     "lead_research_task": "회사 탐색",
+    "identity_disambiguation_task": "동명이회사 식별",
+    "lead_verification_task": "회사 검증",
     "website_audit_task": "홈페이지 진단",
     "competitor_analysis_task": "시장 / 경쟁 분석",
     "landing_page_task": "핵심 메시지 설계",
     "marketing_recommendation_task": "실행안 제안",
-    "proposal_task": "제안서 작성",
-    "email_outreach_task": "아웃바운드 메일 작성",
+    "proposal_task": "제안서 영문 초안 작성",
+    "proposal_localization_task": "제안서 현지화",
+    "email_outreach_task": "메일 영문 초안 작성",
+    "email_localization_task": "메일 현지화",
     "notion_logging_task": "CRM 기록",
 }
 ASSET_TYPE_LABELS = {
     "proposal": "제안서 원본",
+    "proposal_docx": "제안서 Word",
     "proposal_pdf": "제안서 PDF",
     "email_sequence": "메일 시퀀스",
     "marketing_plan": "실행안",
@@ -146,6 +156,16 @@ DEPARTMENT_CONFIG = {
         "summary": "승률이 높은 패턴을 고르고 실제 회사 후보를 찾습니다.",
         "support": ["패턴 탐색팀", "기회 선별팀"],
     },
+    "identity_disambiguation_task": {
+        "department": "회사 식별부",
+        "summary": "동명이회사 후보를 주소, 전화, 이메일 도메인, 홈페이지로 대조해 정확한 회사를 하나로 좁힙니다.",
+        "support": ["회사 검증부"],
+    },
+    "lead_verification_task": {
+        "department": "회사 검증부",
+        "summary": "회사 실체, 공식 홈페이지, 공개 정보가 서로 맞는지 교차 검증합니다.",
+        "support": [],
+    },
     "website_audit_task": {
         "department": "디지털 진단부",
         "summary": "홈페이지 신뢰도, 최신성, 문의 흐름을 진단합니다.",
@@ -167,13 +187,23 @@ DEPARTMENT_CONFIG = {
         "support": [],
     },
     "proposal_task": {
-        "department": "제안서 작성부",
-        "summary": "시니어 세일즈 관점에서 맞춤 제안서를 완성합니다.",
+        "department": "제안서 초안부",
+        "summary": "사실과 논리를 기준으로 영문 canonical 제안서 초안을 만듭니다.",
+        "support": [],
+    },
+    "proposal_localization_task": {
+        "department": "제안서 현지화부",
+        "summary": "고객이 읽는 제안서를 목표 국가 문체로 자연스럽게 현지화합니다.",
         "support": ["품질 검토팀"],
     },
     "email_outreach_task": {
-        "department": "아웃바운드 메일부",
-        "summary": "1차 메일 문안과 후속 흐름의 출발점을 만듭니다.",
+        "department": "메일 초안부",
+        "summary": "구조가 안정적인 영문 canonical 아웃바운드 메일 초안을 만듭니다.",
+        "support": [],
+    },
+    "email_localization_task": {
+        "department": "메일 현지화부",
+        "summary": "발송 직전 메일 문안을 현지 세일즈 톤으로 다듬습니다.",
         "support": [],
     },
 }
@@ -183,6 +213,18 @@ CREW_MEMBER_CONFIG = {
         "crew_label": "lead_research_task",
         "role": "대상 국가에서 실제로 칠 회사를 찾고 탐색 기준을 정리합니다.",
         "vision": "우리에게 유리한 시장부터 정확하게 찾습니다.",
+    },
+    "identity_disambiguation_task": {
+        "name": "정서윤 과장",
+        "crew_label": "identity_disambiguation_task",
+        "role": "동명이회사 후보를 주소, 연락처, 도메인 기준으로 대조해 정확한 회사만 남깁니다.",
+        "vision": "비슷한 이름에 속지 않고 정확한 회사만 다음 단계로 넘깁니다.",
+    },
+    "lead_verification_task": {
+        "name": "윤지후 과장",
+        "crew_label": "lead_verification_task",
+        "role": "회사 실체, 공식 홈페이지, 공개 정보가 같은 대상을 가리키는지 검증합니다.",
+        "vision": "잘못 붙은 회사 정보가 뒤 단계로 퍼지기 전에 끊어냅니다.",
     },
     "market_pattern_finder": {
         "name": "송재민 과장",
@@ -235,8 +277,14 @@ CREW_MEMBER_CONFIG = {
     "proposal_task": {
         "name": "이현우 차장",
         "crew_label": "proposal_task",
-        "role": "시니어 세일즈 관점에서 맞춤 제안서를 완성합니다.",
-        "vision": "읽고 끝나는 문서가 아니라 계약으로 이어지는 제안서를 만듭니다.",
+        "role": "사실과 제안 논리를 기준으로 영문 canonical 제안서 초안을 작성합니다.",
+        "vision": "번역 전에 구조와 사업 논리가 흔들리지 않는 초안을 만듭니다.",
+    },
+    "proposal_localization_task": {
+        "name": "사야카 리드",
+        "crew_label": "proposal_localization_task",
+        "role": "초안을 고객 시장의 언어와 문체로 자연스럽게 현지화합니다.",
+        "vision": "번역투 문장이 아니라 현지 영업 문서처럼 읽히게 만듭니다.",
     },
     "proposal_quality_reviewer": {
         "name": "배수빈 사원",
@@ -247,8 +295,14 @@ CREW_MEMBER_CONFIG = {
     "email_outreach_task": {
         "name": "정유진 대리",
         "crew_label": "email_outreach_task",
-        "role": "1차 메일과 후속 메일 흐름을 작성합니다.",
-        "vision": "첫 문장부터 답장을 이끌어내는 흐름을 설계합니다.",
+        "role": "구조가 안정적인 영문 canonical 메일 초안을 작성합니다.",
+        "vision": "후반 현지화가 쉬운 메일 뼈대를 먼저 만듭니다.",
+    },
+    "email_localization_task": {
+        "name": "에리카 매니저",
+        "crew_label": "email_localization_task",
+        "role": "메일 초안을 현지 세일즈 문체로 다듬고 발송용 톤으로 정리합니다.",
+        "vision": "템플릿 냄새 없이 자연스럽고 답장받기 쉬운 문장으로 바꿉니다.",
     },
     "response_classifier": {
         "name": "임서윤 사원",
@@ -259,12 +313,16 @@ CREW_MEMBER_CONFIG = {
 }
 DEPARTMENT_CREW_MEMBERS = {
     "lead_research_task": ["lead_research_task", "market_pattern_finder", "opportunity_selector"],
+    "identity_disambiguation_task": ["identity_disambiguation_task"],
+    "lead_verification_task": ["lead_verification_task"],
     "website_audit_task": ["website_audit_task"],
     "competitor_analysis_task": ["competitor_analysis_task", "market_localization"],
     "landing_page_task": ["landing_page_task"],
     "marketing_recommendation_task": ["marketing_recommendation_task", "market_strategy_crew"],
-    "proposal_task": ["proposal_task", "proposal_quality_reviewer"],
-    "email_outreach_task": ["email_outreach_task", "response_classifier"],
+    "proposal_task": ["proposal_task"],
+    "proposal_localization_task": ["proposal_localization_task", "proposal_quality_reviewer"],
+    "email_outreach_task": ["email_outreach_task"],
+    "email_localization_task": ["email_localization_task", "response_classifier"],
 }
 SUPPORT_TEAM_CONFIG = [
     {
@@ -327,6 +385,25 @@ def display_status(value: str | None) -> str:
     if not value:
         return "-"
     return RUN_STATUS_LABELS.get(value, value)
+
+
+def summarize_auto_delivery(metadata: dict[str, Any] | None) -> str:
+    payload = parse_json_field((metadata or {}).get("auto_delivery"), {})
+    if not payload:
+        return "판정 없음"
+    eligible = bool(payload.get("eligible"))
+    mode = payload.get("mode") or "manual"
+    reasons = payload.get("blocked_reasons") or []
+    if eligible:
+        return f"{mode} eligible"
+    if reasons:
+        return f"{mode} blocked: {reasons[0]}"
+    return f"{mode} blocked"
+
+
+def summarize_run_auto_delivery(run_row: dict[str, Any] | None) -> dict[str, Any]:
+    metadata = parse_json_field(run_row.get("metadata_json") if run_row else None, {})
+    return parse_json_field(metadata.get("auto_delivery_summary"), {})
 
 
 def display_task_name(value: str | None) -> str:
@@ -740,6 +817,18 @@ def render_dashboard(latest_run: dict[str, Any] | None) -> None:
     c7.metric("예상 비용", f"${float(latest_run.get('estimated_cost_usd', 0) or 0):.4f}")
     c8.metric("마지막 갱신", latest_run.get("last_heartbeat_at") or "-")
 
+    auto_summary = summarize_run_auto_delivery(latest_run)
+    if auto_summary:
+        st.caption(
+            "자동발송 요약: "
+            f"mode={auto_summary.get('mode', 'manual')} | "
+            f"eligible={auto_summary.get('eligible_count', 0)} | "
+            f"blocked={auto_summary.get('blocked_count', 0)} | "
+            f"shadow={auto_summary.get('shadow_simulated_count', 0)} | "
+            f"canary={auto_summary.get('canary_sent_count', 0)} | "
+            f"live={auto_summary.get('live_sent_count', 0)}"
+        )
+
     if latest_run.get("error_message"):
         st.error(latest_run["error_message"])
 
@@ -904,6 +993,7 @@ def render_department_board(tasks: list[dict[str, Any]], latest_run: dict[str, A
                 proposal_asset = next((row for row in asset_rows if row["asset_type"] == "proposal"), None)
                 quality = evaluate_proposal_asset(proposal_asset) if proposal_asset else None
                 metadata = parse_json_field(item.get("metadata_json"), {})
+                validation_issues = metadata.get("validation_issues") or []
                 prompt_text = "이 산출물을 바로 승인할지, 보완 방향이 있다면 메모를 남겨주세요."
                 if quality and quality.get("missing_sections"):
                     prompt_text = (
@@ -923,6 +1013,9 @@ def render_department_board(tasks: list[dict[str, Any]], latest_run: dict[str, A
                     with top_right:
                         st.caption(f"우선순위 {item.get('priority', 0)}")
                         st.caption(f"생성 시각 {item.get('created_at') or '-'}")
+
+                    if validation_issues:
+                        st.warning("Validation 경고: " + " | ".join(validation_issues[:3]))
 
                     if asset_rows:
                         st.dataframe(
@@ -1254,8 +1347,14 @@ def render_approval_queue(test_recipient: str) -> None:
     else:
         for item in waiting:
             with st.expander(f"{item.get('company_name') or '-'} | {item['title']}"):
+                metadata = parse_json_field(item.get("metadata_json"), {})
                 bundle_ids = parse_json_field(item.get("asset_bundle_json"), [])
                 asset_rows = list_assets_by_ids(bundle_ids)
+                st.caption(f"자동발송 판정: {summarize_auto_delivery(metadata)}")
+                auto_delivery = parse_json_field(metadata.get("auto_delivery"), {})
+                blocked_reasons = auto_delivery.get("blocked_reasons") or []
+                if blocked_reasons:
+                    st.warning("자동발송 차단 이유: " + " | ".join(blocked_reasons[:3]))
 
                 if asset_rows:
                     proposal_asset = next((row for row in asset_rows if row["asset_type"] == "proposal"), None)
@@ -1317,7 +1416,6 @@ def render_approval_queue(test_recipient: str) -> None:
                     st.rerun()
 
                 if c3.button("반려 후 재작업", key=f"reject_{item['id']}", use_container_width=True):
-                    metadata = parse_json_field(item.get("metadata_json"), {})
                     reroute = route_rejection(metadata.get("asset_type", "proposal_package"), rejection_reason)
                     update_approval_item(
                         item["id"],
@@ -1404,6 +1502,18 @@ def render_assets(selected_run: dict[str, Any] | None) -> None:
             )
         else:
             st.warning("PDF 파일을 찾지 못했습니다.")
+    elif asset_path.suffix.lower() == ".docx":
+        data = read_asset_bytes(asset_path, asset_metadata)
+        if data:
+            st.download_button(
+                label="Word 내려받기",
+                data=data,
+                file_name=asset_path.name,
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                use_container_width=True,
+            )
+        else:
+            st.warning("Word 파일을 찾지 못했습니다.")
     else:
         st.code(read_asset_content(asset_path, asset_metadata), language="markdown")
 
@@ -1426,6 +1536,7 @@ def render_notifications() -> None:
         [
             {
                 "시각": row["created_at"],
+                "종류": row.get("kind", "-"),
                 "상태": display_status(row["status"]),
                 "제목": row["subject"],
                 "수신자": row["recipient"],
@@ -1439,6 +1550,7 @@ def render_notifications() -> None:
 
 def render_settings() -> None:
     backend_info = describe_runtime_backend()
+    auto_send_settings = get_auto_send_settings()
     st.subheader("운영 설정")
     st.write(f"프로젝트 위치: `{PROJECT_ROOT}`")
     st.write(f"운영 DB: `{DB_PATH}`")
@@ -1453,18 +1565,28 @@ def render_settings() -> None:
         st.info("Notion 매핑은 아직 연결하지 않았습니다. 현재는 Supabase를 운영 원본으로 사용합니다.")
     else:
         st.info("Notion 매핑은 아직 연결하지 않았습니다. 현재는 로컬 SQLite를 운영 원본으로 사용합니다.")
+    st.write(f"자동발송 모드: `{auto_send_settings.mode}`")
+    st.write(f"자동발송 최소 제안서 점수: `{auto_send_settings.min_proposal_score}`")
+    st.write(f"자동발송 PDF 필수 여부: `{auto_send_settings.require_pdf}`")
+    st.write(f"자동발송 최대 건수/실행: `{auto_send_settings.max_items_per_run}`")
+    if auto_send_settings.canary_email:
+        st.write(f"카나리 수신 메일: `{auto_send_settings.canary_email}`")
     st.divider()
     st.markdown("### 구성현황")
     st.caption("메인 파이프라인 부서와 지원 조직이 어떤 역할을 맡는지 정리한 표입니다.")
 
     for task_name in [
         "lead_research_task",
+        "identity_disambiguation_task",
+        "lead_verification_task",
         "website_audit_task",
         "competitor_analysis_task",
         "landing_page_task",
         "marketing_recommendation_task",
         "proposal_task",
+        "proposal_localization_task",
         "email_outreach_task",
+        "email_localization_task",
     ]:
         department = DEPARTMENT_CONFIG.get(task_name, {})
         members = get_department_members(task_name)

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import re
 import subprocess
 import sys
 import threading
 import traceback
 import uuid
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -14,10 +17,20 @@ from typing import Any
 from sales_factory.crew import SalesFactory
 from sales_factory.proposal_quality import evaluate_proposal_path, evaluate_proposal_text
 from sales_factory.runtime_assets import build_company_assets, create_approval_queue
+from sales_factory.auto_delivery import (
+    assess_company_sendability,
+    execute_auto_send,
+    get_auto_send_settings,
+    load_verified_recipients,
+)
 from sales_factory.runtime_db import (
     PROJECT_ROOT,
     create_run,
+    get_run_output_dir,
+    get_run,
+    get_run_workspace,
     init_db,
+    list_assets_by_ids,
     list_approval_items_for_run,
     list_assets,
     list_pending_tasks,
@@ -25,6 +38,8 @@ from sales_factory.runtime_db import (
     now_iso,
     record_notification,
     register_tasks,
+    summarize_approval_items,
+    update_approval_item,
     update_run,
     update_task,
 )
@@ -50,6 +65,7 @@ MODEL_PRICING_USD_PER_MILLION: dict[str, tuple[float, float]] = {
 
 ASSET_TYPE_LABELS = {
     "proposal": "제안서 원본",
+    "proposal_docx": "제안서 Word",
     "proposal_pdf": "제안서 PDF",
     "email_sequence": "아웃바운드 메일",
     "marketing_plan": "실행안",
@@ -104,11 +120,37 @@ def resolve_python_executable() -> str:
     return sys.executable
 
 
-def run_pdf_generation() -> None:
+@contextmanager
+def working_directory(path: Path):
+    original = Path.cwd()
+    os.chdir(path)
+    try:
+        yield
+    finally:
+        os.chdir(original)
+
+
+def run_pdf_generation(*, workspace_dir: Path, output_dir: Path, proposal_language: str | None = None) -> None:
     script_path = PROJECT_ROOT / "generate_pdf_playwright.py"
     if not script_path.exists():
         return
-    subprocess.run([resolve_python_executable(), str(script_path)], cwd=str(PROJECT_ROOT), check=False)
+    proposal_path = workspace_dir / "proposal.md"
+    if not proposal_path.exists():
+        return
+    command = [
+        resolve_python_executable(),
+        str(script_path),
+        "--proposal",
+        str(proposal_path),
+        "--out",
+        str(output_dir),
+    ]
+    if proposal_language:
+        command.extend(["--language", proposal_language])
+    require_pdf = os.environ.get("SALES_FACTORY_REQUIRE_PDF", "").strip().lower() in {"1", "true", "yes"}
+    if require_pdf:
+        command.append("--require-pdf")
+    subprocess.run(command, cwd=str(PROJECT_ROOT), check=False)
 
 
 def build_inputs(args: argparse.Namespace) -> dict[str, Any]:
@@ -132,6 +174,140 @@ def build_inputs(args: argparse.Namespace) -> dict[str, Any]:
         "strategy_snapshot": strategy_snapshot,
     }
     return payload
+
+
+def _split_pipe_row(line: str) -> list[str]:
+    stripped = line.strip().strip("|")
+    cells = re.split(r"(?<!\\)\|", stripped)
+    return [cell.replace("\\|", "|").strip() for cell in cells]
+
+
+def _read_markdown_table_rows(path: Path) -> tuple[list[str], list[list[str]], int]:
+    if not path.exists():
+        return [], [], -1
+
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    header_index = next((index for index, line in enumerate(lines) if line.strip().startswith("| company_name |")), -1)
+    if header_index < 0 or header_index + 1 >= len(lines):
+        return [], [], -1
+
+    headers = _split_pipe_row(lines[header_index])
+    rows: list[list[str]] = []
+    for line in lines[header_index + 2 :]:
+        stripped = line.strip()
+        if not stripped.startswith("|"):
+            continue
+        cells = _split_pipe_row(line)
+        if len(cells) != len(headers):
+            continue
+        rows.append(cells)
+    return headers, rows, header_index
+
+
+def sanitize_identity_disambiguation_output(workspace_dir: Path) -> tuple[int, int]:
+    disambiguation_path = workspace_dir / "identity_disambiguation.md"
+    headers, rows, header_index = _read_markdown_table_rows(disambiguation_path)
+    if header_index < 0 or "disambiguation_status" not in headers:
+        return 0, 0
+
+    status_index = headers.index("disambiguation_status")
+    retained_rows = [row for row in rows if row[status_index].lower() == "selected"]
+    lines = disambiguation_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    rewritten = [
+        f"TOTAL_COMPANIES: {len(retained_rows)}",
+        lines[header_index],
+        lines[header_index + 1],
+        *[f"| {' | '.join(row)} |" for row in retained_rows],
+        "",
+    ]
+    disambiguation_path.write_text("\n".join(rewritten), encoding="utf-8")
+    return len(rows), len(retained_rows)
+
+
+def _normalize_identity_blank(value: str) -> bool:
+    return value.strip().lower() in {"", "-", "n/a", "na", "none", "none found", "no conflict"}
+
+
+def enforce_identity_disambiguation_guard(workspace_dir: Path, *, lead_mode: str) -> None:
+    disambiguation_path = workspace_dir / "identity_disambiguation.md"
+    headers, rows, _ = _read_markdown_table_rows(disambiguation_path)
+    if not rows:
+        raise RuntimeError("Identity disambiguation did not retain any company. Manual review is required before proposal generation.")
+
+    if lead_mode != "company_name":
+        return
+
+    if len(rows) != 1:
+        raise RuntimeError("Exact-company mode requires exactly one disambiguated company. Manual review is required before proposal generation.")
+
+    row = dict(zip(headers, rows[0]))
+    if row.get("disambiguation_status", "").strip().lower() != "selected":
+        raise RuntimeError("Exact-company mode did not produce a selected identity record.")
+
+    if row.get("identity_confidence", "").strip().lower() != "high":
+        raise RuntimeError("Exact-company mode requires high identity confidence before proposal generation.")
+
+    corroboration_fields = [
+        row.get("official_address", ""),
+        row.get("official_phone", ""),
+        row.get("official_email_domain", ""),
+        row.get("homepage_url_if_any", ""),
+    ]
+    corroboration_count = sum(0 if _normalize_identity_blank(value) else 1 for value in corroboration_fields)
+    if corroboration_count < 2:
+        raise RuntimeError("Identity disambiguation did not produce enough corroborating address/contact evidence.")
+
+    has_digital_anchor = not _normalize_identity_blank(row.get("official_email_domain", "")) or not _normalize_identity_blank(
+        row.get("homepage_url_if_any", "")
+    )
+    if not has_digital_anchor:
+        raise RuntimeError("Exact-company mode requires an official homepage or email-domain anchor before proposal generation.")
+
+    if _normalize_identity_blank(row.get("identity_match_basis", "")):
+        raise RuntimeError("Identity disambiguation did not explain why this company was selected.")
+
+    if not _normalize_identity_blank(row.get("conflict_notes", "")):
+        raise RuntimeError("Identity disambiguation detected unresolved conflicts. Manual review is required before proposal generation.")
+
+
+def validate_identity_disambiguation_output(workspace_dir: Path, *, lead_mode: str) -> None:
+    raw_rows, retained_rows = sanitize_identity_disambiguation_output(workspace_dir)
+    if raw_rows and retained_rows == 0:
+        raise RuntimeError("Identity disambiguation rejected every company. Manual review is required before proposal generation.")
+    enforce_identity_disambiguation_guard(workspace_dir, lead_mode=lead_mode)
+
+
+def sanitize_lead_verification_output(workspace_dir: Path) -> tuple[int, int]:
+    verification_path = workspace_dir / "lead_verification.md"
+    headers, rows, header_index = _read_markdown_table_rows(verification_path)
+    if header_index < 0:
+        return 0, 0
+
+    if "verification_status" not in headers:
+        return 0, 0
+    status_index = headers.index("verification_status")
+
+    retained_rows = [cells for cells in rows if cells[status_index].lower() in {"verified", "corrected"}]
+    lines = verification_path.read_text(encoding="utf-8", errors="replace").splitlines()
+
+    rewritten = [
+        f"TOTAL_COMPANIES: {len(retained_rows)}",
+        lines[header_index],
+        lines[header_index + 1],
+        *[f"| {' | '.join(row)} |" for row in retained_rows],
+        "",
+    ]
+    verification_path.write_text("\n".join(rewritten), encoding="utf-8")
+    return len(rows), len(retained_rows)
+
+
+def materialize_task_output_snapshot(output_path: str, raw_text: str) -> None:
+    if not output_path or not raw_text.strip():
+        return
+    path = Path(output_path)
+    if path.exists() and path.read_text(encoding="utf-8", errors="replace").strip():
+        return
+    path.write_text(raw_text, encoding="utf-8")
 
 
 def parse_task_plan(crew: Any) -> list[dict[str, Any]]:
@@ -320,6 +496,8 @@ def build_review_ready_email_v2(
 
     for index, item in enumerate(review_items, start=1):
         related_ids = parse_json_value(item.get("asset_bundle_json"), [])
+        metadata = parse_json_value(item.get("metadata_json"), {})
+        validation_issues = parse_json_value(metadata.get("validation_issues"), [])
 
         related_assets = [assets_by_id[asset_id] for asset_id in related_ids if asset_id in assets_by_id]
         asset_names = [ASSET_TYPE_LABELS.get(asset["asset_type"], asset["asset_type"]) for asset in related_assets]
@@ -338,6 +516,10 @@ def build_review_ready_email_v2(
                 missing_text = ", ".join(quality["missing_sections"][:3])
                 review_reason += f", 빠진 섹션: {missing_text}"
                 check_points.insert(1, f"빠진 섹션({missing_text})이 실제로 보완됐는지 확인")
+        if validation_issues:
+            issue_text = "; ".join(validation_issues[:2])
+            review_reason += f", validation 경고: {issue_text}"
+            check_points.insert(1, f"placeholder/언어 경고({issue_text})가 실제 수정됐는지 확인")
 
         primary_name = item.get("company_name") or item["title"]
         asset_summary = ", ".join(asset_names) if asset_names else "산출물 확인 필요"
@@ -407,9 +589,152 @@ def build_failure_email(
     return subject, body
 
 
+def process_auto_delivery_queue(
+    *,
+    run_id: str,
+    workspace_dir: Path,
+    test_mode: bool,
+) -> dict[str, Any]:
+    settings = get_auto_send_settings()
+    waiting_items = list_approval_items_for_run(run_id, status="waiting_approval")
+    verified_recipients = load_verified_recipients(workspace_dir)
+    summary: dict[str, Any] = {
+        "mode": settings.mode,
+        "total_items": len(waiting_items),
+        "eligible_count": 0,
+        "blocked_count": 0,
+        "shadow_simulated_count": 0,
+        "canary_sent_count": 0,
+        "live_sent_count": 0,
+        "manual_review_count": 0,
+        "items": [],
+    }
+
+    for index, item in enumerate(waiting_items):
+        metadata = parse_json_value(item.get("metadata_json"), {})
+        asset_rows = list_assets_by_ids(parse_json_value(item.get("asset_bundle_json"), []))
+        validation_issues = parse_json_value(metadata.get("validation_issues"), [])
+        assessment = assess_company_sendability(
+            company_name=item.get("company_name") or item["title"],
+            asset_rows=asset_rows,
+            validation_issues=validation_issues,
+            verified_recipients=verified_recipients,
+            settings=settings,
+            test_mode=test_mode,
+        )
+        item_result: dict[str, Any] = assessment.to_metadata()
+        item_result["approval_item_id"] = item["id"]
+
+        if assessment.eligible:
+            summary["eligible_count"] += 1
+        else:
+            summary["blocked_count"] += 1
+            summary["manual_review_count"] += 1
+
+        if settings.mode in {"shadow", "canary", "live"} and assessment.eligible and index < settings.max_items_per_run:
+            try:
+                delivery_result = execute_auto_send(
+                    asset_rows=asset_rows,
+                    assessment=assessment,
+                    settings=settings,
+                )
+                item_result["delivery_result"] = delivery_result
+                notification_status = delivery_result.get("status", "sent")
+                notification_subject = delivery_result.get("subject", item["title"])
+                notification_recipient = delivery_result.get("recipient", "")
+                record_notification(
+                    run_id,
+                    "auto_delivery",
+                    notification_status,
+                    notification_subject,
+                    notification_recipient,
+                    {
+                        "approval_item_id": item["id"],
+                        "company_name": item.get("company_name"),
+                        "mode": settings.mode,
+                        "intended_recipient": assessment.recipient_email,
+                        "blocked_reasons": assessment.blocked_reasons,
+                        "attachments": delivery_result.get("attachments", []),
+                    },
+                )
+                if settings.mode == "shadow":
+                    summary["shadow_simulated_count"] += 1
+                elif settings.mode == "canary" and delivery_result.get("status") == "sent":
+                    summary["canary_sent_count"] += 1
+                elif settings.mode == "live" and delivery_result.get("status") == "sent":
+                    summary["live_sent_count"] += 1
+                    update_approval_item(
+                        item["id"],
+                        status="approved",
+                        decided_at=now_iso(),
+                        metadata_json={**metadata, "auto_delivery": item_result},
+                    )
+                    summary["items"].append(item_result)
+                    continue
+            except Exception as exc:
+                item_result["delivery_result"] = {
+                    "mode": settings.mode,
+                    "status": "failed",
+                    "recipient": assessment.recipient_email,
+                    "error": str(exc),
+                }
+                record_notification(
+                    run_id,
+                    "auto_delivery",
+                    "failed",
+                    f"Auto-delivery failed for {item.get('company_name') or item['title']}",
+                    assessment.recipient_email,
+                    {
+                        "approval_item_id": item["id"],
+                        "company_name": item.get("company_name"),
+                        "mode": settings.mode,
+                        "error": str(exc),
+                    },
+                )
+                summary["manual_review_count"] += 1
+        elif settings.mode in {"shadow", "canary", "live"} and not assessment.eligible:
+            record_notification(
+                run_id,
+                "auto_delivery",
+                "blocked",
+                f"Auto-delivery blocked for {item.get('company_name') or item['title']}",
+                assessment.recipient_email,
+                {
+                    "approval_item_id": item["id"],
+                    "company_name": item.get("company_name"),
+                    "mode": settings.mode,
+                    "blocked_reasons": assessment.blocked_reasons,
+                },
+            )
+        elif settings.mode in {"shadow", "canary", "live"} and assessment.eligible:
+            item_result["delivery_result"] = {
+                "mode": settings.mode,
+                "status": "deferred",
+                "recipient": assessment.recipient_email,
+                "reason": f"max_items_per_run={settings.max_items_per_run}",
+            }
+            summary["manual_review_count"] += 1
+
+        update_approval_item(
+            item["id"],
+            metadata_json={**metadata, "auto_delivery": item_result},
+        )
+        summary["items"].append(item_result)
+
+    summary_counts = summarize_approval_items(run_id)
+    summary["remaining_waiting_count"] = int(summary_counts.get("waiting_count") or 0)
+    summary["approved_count"] = int(summary_counts.get("approved_count") or 0)
+    summary["rejected_count"] = int(summary_counts.get("rejected_count") or 0)
+    return summary
+
+
 def run_managed(args: argparse.Namespace) -> str:
     init_db()
     run_id = str(uuid.uuid4())
+    workspace_dir = get_run_workspace(run_id)
+    output_dir = get_run_output_dir(run_id)
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
     inputs = build_inputs(args)
 
     sales_factory = SalesFactory()
@@ -437,6 +762,8 @@ def run_managed(args: argparse.Namespace) -> str:
                 "notify_email": args.notify_email,
                 "auto_mode": inputs.get("auto_mode", False),
                 "strategy_snapshot": inputs.get("strategy_snapshot", {}),
+                "workspace_dir": str(workspace_dir),
+                "output_dir": str(output_dir),
             },
         },
     )
@@ -463,23 +790,32 @@ def run_managed(args: argparse.Namespace) -> str:
                 task_name = pending[0]["task_name"]
         if not task_name:
             return
-
         task_row = task_lookup.get(task_name, {})
         task_obj = next((task for task in crew.tasks if task.name == task_name), None)
         agent = getattr(task_obj, "agent", None)
         llm = getattr(agent, "llm", None)
+        output_path = ""
+        if task_obj and getattr(task_obj, "output_file", None):
+            output_path = str(workspace_dir / task_obj.output_file)
+        raw_text = getattr(task_output, "raw", "") or ""
+        materialize_task_output_snapshot(output_path, raw_text)
+
+        if task_name == "identity_disambiguation_task":
+            validate_identity_disambiguation_output(
+                workspace_dir,
+                lead_mode=str(inputs.get("lead_mode", "region_or_industry") or "region_or_industry"),
+            )
+        if task_name == "lead_verification_task":
+            raw_rows, retained_rows = sanitize_lead_verification_output(workspace_dir)
+            if raw_rows and retained_rows == 0:
+                raise RuntimeError("Lead verification rejected every company. Manual review is required before proposal generation.")
+
         usage = llm.get_token_usage_summary() if llm and hasattr(llm, "get_token_usage_summary") else None
         prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
         completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
         total_tokens = int(getattr(usage, "total_tokens", 0) or 0)
         model_name = task_row.get("model_name")
         estimated_cost = estimate_cost_usd(model_name, prompt_tokens, completion_tokens)
-
-        output_path = ""
-        if task_obj and getattr(task_obj, "output_file", None):
-            output_path = str(PROJECT_ROOT / task_obj.output_file)
-
-        raw_text = getattr(task_output, "raw", "") or ""
         update_task(
             run_id,
             task_name,
@@ -524,10 +860,47 @@ def run_managed(args: argparse.Namespace) -> str:
     heartbeat_thread.start()
 
     try:
-        result = crew.kickoff(inputs=inputs)
-        run_pdf_generation()
-        company_assets = build_company_assets(run_id)
-        approval_count = create_approval_queue(run_id, company_assets)
+        with working_directory(workspace_dir):
+            result = crew.kickoff(inputs=inputs)
+        validate_identity_disambiguation_output(
+            workspace_dir,
+            lead_mode=str(inputs.get("lead_mode", "region_or_industry") or "region_or_industry"),
+        )
+        raw_rows, retained_rows = sanitize_lead_verification_output(workspace_dir)
+        if raw_rows and retained_rows == 0:
+            raise RuntimeError("Lead verification rejected every company. Manual review is required before proposal generation.")
+        run_pdf_generation(
+            workspace_dir=workspace_dir,
+            output_dir=output_dir,
+            proposal_language=inputs.get("proposal_language"),
+        )
+        company_assets, validation_issues = build_company_assets(
+            run_id,
+            workspace_dir=workspace_dir,
+            output_dir=output_dir,
+            proposal_language=inputs.get("proposal_language"),
+        )
+        for company_name, issues in sorted(validation_issues.items()):
+            record_notification(
+                run_id,
+                "delivery_guard",
+                "warning",
+                f"Delivery guard flagged {company_name}",
+                "",
+                {
+                    "company_name": company_name,
+                    "issues": issues,
+                },
+            )
+        approval_count = create_approval_queue(run_id, company_assets, validation_issues)
+        run_row = get_run(run_id)
+        run_metadata = parse_json_value(run_row.get("metadata_json") if run_row else None, {})
+        auto_delivery_summary = process_auto_delivery_queue(
+            run_id=run_id,
+            workspace_dir=workspace_dir,
+            test_mode=bool(args.test_mode),
+        )
+        approval_count = int(auto_delivery_summary.get("remaining_waiting_count") or approval_count)
         usage = getattr(result, "token_usage", None)
         prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
         completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
@@ -538,6 +911,13 @@ def run_managed(args: argparse.Namespace) -> str:
         task_rows = list_task_costs(run_id)
         estimated_cost = round(sum(float(row["estimated_cost_usd"] or 0) for row in task_rows), 6)
         final_status = "waiting_approval" if approval_count else "completed"
+        if (
+            approval_count == 0
+            and auto_delivery_summary.get("mode") == "live"
+            and int(auto_delivery_summary.get("live_sent_count") or 0) > 0
+        ):
+            final_status = "auto_sent"
+        run_metadata["auto_delivery_summary"] = auto_delivery_summary
         update_run(
             run_id,
             status=final_status,
@@ -552,6 +932,7 @@ def run_managed(args: argparse.Namespace) -> str:
             successful_requests=successful_requests,
             estimated_cost_usd=estimated_cost,
             approval_count=approval_count,
+            metadata_json=run_metadata,
         )
 
         if args.notify_email:
