@@ -120,7 +120,7 @@ proposal_writer:
     localizes and renders. You optimize for factual rigor, clear business logic,
     and structural consistency. Your English draft must be stable enough that a
     localizer can translate it without changing the sales argument.
-  llm: anthropic/claude-sonnet-4-5
+  llm: gemini/gemini-2.5-pro
 
 proposal_localizer:
   role: >
@@ -134,7 +134,7 @@ proposal_localizer:
     the proposal so it sounds natural to the target market. You preserve exact
     pipeline control headings when instructed, but every customer-facing sentence
     should read as if a native operator wrote it.
-  llm: anthropic/claude-sonnet-4-5
+  llm: gemini/gemini-2.5-pro
 
 email_writer:
   role: >
