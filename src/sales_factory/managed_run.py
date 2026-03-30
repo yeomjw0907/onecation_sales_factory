@@ -740,15 +740,11 @@ def run_managed(args: argparse.Namespace) -> str:
     output_dir.mkdir(parents=True, exist_ok=True)
     inputs = build_inputs(args)
 
-    sales_factory = SalesFactory()
-    crew = sales_factory.crew()
-    crew.tasks = [task for task in crew.tasks if task.name != "notion_logging_task"]
-    task_plan = parse_task_plan(crew)
-
+    # Create the run record first so any init failure is visible in the dashboard
     create_run(
         run_id,
         {
-            "crew_name": getattr(crew, "name", "SalesFactory"),
+            "crew_name": "SalesFactory",
             "trigger_source": args.trigger_source,
             "status": "running",
             "lead_mode": inputs.get("lead_mode"),
@@ -770,6 +766,22 @@ def run_managed(args: argparse.Namespace) -> str:
             },
         },
     )
+
+    try:
+        sales_factory = SalesFactory()
+        crew = sales_factory.crew()
+    except Exception as exc:
+        update_run(
+            run_id,
+            status="failed",
+            finished_at=now_iso(),
+            last_heartbeat_at=now_iso(),
+            error_message=f"Crew init failed: {exc}",
+        )
+        raise
+
+    crew.tasks = [task for task in crew.tasks if task.name != "notion_logging_task"]
+    task_plan = parse_task_plan(crew)
     register_tasks(run_id, task_plan)
 
     _country = args.target_country or "-"
