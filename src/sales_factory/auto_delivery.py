@@ -15,6 +15,7 @@ from sales_factory.runtime_supabase import is_render_environment, materialize_lo
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 HANGUL_RE = re.compile(r"[\uac00-\ud7af]")
 HIRAGANA_KATAKANA_RE = re.compile(r"[\u3040-\u30ff]")
+NON_WORD_TEXT_RE = re.compile(r"[^0-9A-Za-z\u3040-\u30ff\uac00-\ud7af]+")
 PUBLIC_EMAIL_DOMAINS = {
     "gmail.com",
     "googlemail.com",
@@ -359,21 +360,81 @@ def extract_proposal_direction(asset_rows: list[dict[str, Any]]) -> str:
     return " ".join(captured).strip()
 
 
+def summarize_offer_summary(offer_summary: str) -> str:
+    cleaned = " ".join(offer_summary.split()).strip()
+    if not cleaned:
+        return ""
+    sentences = re.split(r"(?<=[.!?。！？])\s+", cleaned)
+    return (sentences[0] if sentences else cleaned).strip()
+
+
+def normalize_overlap_text(text: str) -> str:
+    normalized = NON_WORD_TEXT_RE.sub(" ", text.lower())
+    return " ".join(normalized.split())
+
+
+def body_already_mentions_offer(body: str, offer_summary: str) -> bool:
+    normalized_body = normalize_overlap_text(body)
+    normalized_offer = normalize_overlap_text(offer_summary)
+    if not normalized_body or not normalized_offer:
+        return False
+    if normalized_offer in normalized_body:
+        return True
+
+    offer_tokens = {token for token in normalized_offer.split() if len(token) >= 4}
+    if not offer_tokens:
+        offer_tokens = {token for token in normalized_offer.split() if len(token) >= 2}
+    if not offer_tokens:
+        return False
+
+    overlap_count = sum(1 for token in offer_tokens if token in normalized_body)
+    return overlap_count >= max(1, min(3, len(offer_tokens)))
+
+
+def body_already_has_closing(body: str, language: str) -> bool:
+    markers = {
+        "ko": ("감사합니다", "검토해 주셔서 감사합니다", "회신 주시면"),
+        "ja": ("ありがとうございます", "ご確認ありがとうございます", "ご返信いただければ"),
+        "en": ("thank you", "thanks", "i would be glad to", "happy to walk you through"),
+    }
+    body_lower = body.lower()
+    return any(marker.lower() in body_lower for marker in markers.get(language, ()))
+
+
+def format_intro(language: str, sender_identity: str) -> str:
+    if "onecation" in sender_identity.lower():
+        return {
+            "ko": f"안녕하십니까, {sender_identity}입니다.",
+            "ja": f"こんにちは。{sender_identity}です。",
+            "en": f"Hello, this is {sender_identity}.",
+        }[language]
+
+    return {
+        "ko": f"안녕하십니까, Onecation의 {sender_identity}입니다.",
+        "ja": f"こんにちは。Onecationの{sender_identity}です。",
+        "en": f"Hello, this is {sender_identity} from Onecation.",
+    }[language]
+
+
+def format_signature_block(sender_identity: str, sender_email: str) -> str:
+    if not sender_identity or sender_identity.lower() == "onecation":
+        first_line = "Onecation"
+    elif "onecation" in sender_identity.lower():
+        first_line = sender_identity
+    else:
+        first_line = f"{sender_identity} | Onecation"
+
+    lines = [first_line]
+    if sender_email:
+        lines.append(sender_email)
+    return "\n".join(lines)
+
+
 def compose_primary_email_body(body: str, *, cta: str, offer_summary: str) -> str:
     language = detect_email_language(body)
     sender_identity = resolve_sender_identity(language)
     sender_email = os.environ.get("SMTP_USER", "").strip()
 
-    intro_map = {
-        "ko": f"안녕하세요. {sender_identity}입니다.",
-        "ja": f"こんにちは。{sender_identity}です。",
-        "en": f"Hello, this is {sender_identity}.",
-    }
-    offer_map = {
-        "ko": "이번에 제안드리는 핵심은 다음과 같습니다: ",
-        "ja": "今回ご提案したい主な内容は次のとおりです: ",
-        "en": "The core offer we are proposing is: ",
-    }
     closing_map = {
         "ko": "검토해 주셔서 감사합니다. 편하신 시간에 회신 주시면 제안 내용을 더 구체적으로 설명드리겠습니다.",
         "ja": "ご確認ありがとうございます。ご都合のよいタイミングでご返信いただければ、提案内容を詳しくご説明します。",
@@ -382,22 +443,21 @@ def compose_primary_email_body(body: str, *, cta: str, offer_summary: str) -> st
 
     chunks: list[str] = []
     if "onecation" not in body.lower():
-        chunks.append(intro_map[language])
+        chunks.append(format_intro(language, sender_identity))
 
     chunks.append(body.strip())
 
-    if offer_summary:
-        chunks.append(f"{offer_map[language]}{offer_summary}")
+    concise_offer_summary = summarize_offer_summary(offer_summary)
+    if concise_offer_summary and not body_already_mentions_offer(body, concise_offer_summary):
+        chunks.append(concise_offer_summary)
+
+    if not body_already_has_closing(body, language):
+        chunks.append(closing_map[language])
 
     if cta:
         chunks.append(cta)
 
-    chunks.append(closing_map[language])
-
-    signature_lines = [sender_identity, "Onecation"]
-    if sender_email:
-        signature_lines.append(sender_email)
-    chunks.append("\n".join(signature_lines))
+    chunks.append(format_signature_block(sender_identity, sender_email))
 
     return "\n\n".join(part for part in chunks if part and part.strip())
 

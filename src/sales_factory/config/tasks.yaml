@@ -490,6 +490,14 @@ email_outreach_task:
       - Never leave bracket placeholders such as [your name], [contact name], or [city].
       - Always use plain ASCII punctuation instead of smart quotes or typographic
         apostrophes.
+      - Open with a clear sender introduction such as "{sender_name} from Onecation".
+      - Lead with the company's own strengths, position, or current situation before
+        naming competitors.
+      - Use competitor references only as brief supporting context, not as the first
+        or dominant message.
+      - State the core offer once clearly, then explain the concrete business effect.
+        Do not repeat the same offer pitch twice.
+      - End with one thank-you/closing only. Avoid duplicated gratitude lines.
 
     The first email should make it clear that real work was already done:
     review, diagnosis, competitor context, and tailored execution ideas.
@@ -499,6 +507,9 @@ email_outreach_task:
     - a short, polite closing sentence before the CTA field
     If website access was uncertain, describe it as an audit verification issue,
     not as a hard factual claim that the company has no website.
+    Use softened language such as "in our review environment" or "your online
+    strengths are not yet clearly visible" instead of declaring that the site is
+    unavailable unless that fact is fully verified.
     Never cite raw audit-environment error strings such as DNS, TLS, name
     resolution, getaddrinfo, timeout, connection refused, or browser error-page
     wording in customer-facing copy. Rewrite them into neutral language about
@@ -517,8 +528,10 @@ email_outreach_task:
     - body:
       A ready-to-send email body. It must contain:
       1. a short Onecation introduction near the top
-      2. one explicit sentence naming the proposed offer
-      3. one polite closing sentence before the CTA
+      2. one short paragraph that starts from the company's own strengths or current situation
+      3. one explicit sentence naming the proposed offer
+      4. one short paragraph explaining the expected business effect
+      5. one polite closing sentence before the CTA
     - cta: ...
 
     ## Follow Up 1
@@ -559,6 +572,10 @@ email_localization_task:
         the canonical English draft and the localized proposal.
       - Keep the Onecation introduction, explicit offer sentence, and polite
         closing sentence intact in intent, even when the wording is localized.
+      - Keep the email flow natural: company strength first, supporting market
+        context second, explicit offer next, then one closing.
+      - Do not turn competitor mentions into the headline of the email.
+      - Do not duplicate the offer statement or closing sentence during localization.
       - Keep geography aligned with the verified upstream location. Do not swap
         in a different city, state, metro area, or competitor region.
       - Do not leave placeholders such as [your name], [contact name], or [city].

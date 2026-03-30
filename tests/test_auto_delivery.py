@@ -271,6 +271,100 @@ class AutoDeliveryTests(unittest.TestCase):
             self.assertIn("ops@onecation.co.kr", body)
             self.assertEqual(attachments, [pdf_path])
 
+    def test_build_primary_email_payload_does_not_duplicate_existing_offer_or_closing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            email_path = temp_path / "outreach_emails.md"
+            email_path.write_text(
+                "# Acme Co.\n"
+                "## Primary Outbound Email\n"
+                "- subject: Hello\n"
+                "- preview_line: Preview\n"
+                "- body:\n"
+                "    Hello, this is Minjun Kim from Onecation.\n"
+                "    \n"
+                "    Acme has built a strong reputation with local manufacturing customers.\n"
+                "    \n"
+                "    The offer is a website relaunch focused on portfolio visibility and quote capture.\n"
+                "    \n"
+                "    Thank you for reviewing this.\n"
+                "- cta: Could we schedule a 20-minute call next week?\n",
+                encoding="utf-8",
+            )
+            proposal_path = temp_path / "proposal.md"
+            proposal_path.write_text(
+                "# Acme Co.\n"
+                "## Recommended Direction\n"
+                "The offer is a website relaunch focused on portfolio visibility and quote capture.\n",
+                encoding="utf-8",
+            )
+            pdf_path = temp_path / "proposal.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4")
+
+            with patch.dict(
+                "os.environ",
+                {
+                    "SMTP_USER": "ops@onecation.co.kr",
+                    "SALES_FACTORY_SENDER_NAME": "Minjun Kim",
+                },
+                clear=False,
+            ):
+                _subject, body, _attachments = build_primary_email_payload(
+                    [
+                        {"asset_type": "email_sequence", "path": str(email_path), "metadata_json": {}},
+                        {"asset_type": "proposal", "path": str(proposal_path), "metadata_json": {}},
+                        {"asset_type": "proposal_pdf", "path": str(pdf_path), "metadata_json": {}},
+                    ]
+                )
+
+            self.assertEqual(body.count("website relaunch focused on portfolio visibility and quote capture"), 1)
+            self.assertEqual(body.count("Thank you for reviewing this."), 1)
+            self.assertNotIn("The core offer we are proposing is:", body)
+            self.assertIn("Minjun Kim | Onecation", body)
+
+    def test_build_primary_email_payload_adds_affiliation_intro_when_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            email_path = temp_path / "outreach_emails.md"
+            email_path.write_text(
+                "# Acme Co.\n"
+                "## Primary Outbound Email\n"
+                "- subject: Hello\n"
+                "- preview_line: Preview\n"
+                "- body:\n"
+                "    We reviewed Acme's current website and quote flow.\n"
+                "- cta: Could we schedule a 20-minute call next week?\n",
+                encoding="utf-8",
+            )
+            proposal_path = temp_path / "proposal.md"
+            proposal_path.write_text(
+                "# Acme Co.\n"
+                "## Recommended Direction\n"
+                "We recommend a website relaunch that better shows recent work.\n",
+                encoding="utf-8",
+            )
+            pdf_path = temp_path / "proposal.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4")
+
+            with patch.dict(
+                "os.environ",
+                {
+                    "SMTP_USER": "ops@onecation.co.kr",
+                    "SALES_FACTORY_SENDER_NAME": "Minjun Kim",
+                },
+                clear=False,
+            ):
+                _subject, body, _attachments = build_primary_email_payload(
+                    [
+                        {"asset_type": "email_sequence", "path": str(email_path), "metadata_json": {}},
+                        {"asset_type": "proposal", "path": str(proposal_path), "metadata_json": {}},
+                        {"asset_type": "proposal_pdf", "path": str(pdf_path), "metadata_json": {}},
+                    ]
+                )
+
+            self.assertIn("Hello, this is Minjun Kim from Onecation.", body)
+            self.assertIn("Minjun Kim | Onecation", body)
+
     def test_build_primary_email_payload_falls_back_to_docx_attachment(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
