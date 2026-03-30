@@ -3,10 +3,16 @@ from __future__ import annotations
 import json
 import mimetypes
 import os
+import time
 from hashlib import sha1
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+try:
+    import httpx
+except ImportError:  # pragma: no cover - optional at import time
+    httpx = None  # type: ignore[assignment]
 
 try:
     from supabase import Client, create_client
@@ -33,6 +39,12 @@ JSON_COLUMNS = {
 
 _ENV_LOADED = False
 _CLIENT: Client | None = None
+RETRYABLE_MESSAGE_FRAGMENTS = (
+    "server disconnected",
+    "connection reset",
+    "connection aborted",
+    "broken pipe",
+)
 
 
 def now_iso() -> str:
@@ -155,6 +167,47 @@ def get_supabase_client() -> Client:
     return _CLIENT
 
 
+def reset_supabase_client() -> None:
+    global _CLIENT
+    _CLIENT = None
+
+
+def is_retryable_supabase_error(exc: Exception) -> bool:
+    if httpx is not None and isinstance(
+        exc,
+        (
+            httpx.RemoteProtocolError,
+            httpx.ReadTimeout,
+            httpx.ConnectTimeout,
+            httpx.ConnectError,
+            httpx.WriteError,
+            httpx.ReadError,
+        ),
+    ):
+        return True
+
+    lowered = str(exc).lower()
+    return any(fragment in lowered for fragment in RETRYABLE_MESSAGE_FRAGMENTS)
+
+
+def execute_with_retry(request_factory, *, attempts: int = 3):
+    last_error: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            client = get_supabase_client()
+            return request_factory(client)
+        except Exception as exc:
+            last_error = exc
+            if attempt >= attempts - 1 or not is_retryable_supabase_error(exc):
+                raise
+            reset_supabase_client()
+            time.sleep(0.25 * (attempt + 1))
+
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("Supabase request failed before execution.")
+
+
 def _normalize_row(row: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(row)
     for column in JSON_COLUMNS:
@@ -227,14 +280,17 @@ def select_rows(
     order_by: tuple[str, bool] | None = None,
     limit: int | None = None,
 ) -> list[dict[str, Any]]:
-    query = get_supabase_client().table(table).select("*")
-    query = _apply_filters(query, filters)
-    if order_by:
-        column, descending = order_by
-        query = query.order(column, desc=descending)
-    if limit is not None:
-        query = query.limit(limit)
-    response = query.execute()
+    def _run(client: Client):
+        query = client.table(table).select("*")
+        query = _apply_filters(query, filters)
+        if order_by:
+            column, descending = order_by
+            query = query.order(column, desc=descending)
+        if limit is not None:
+            query = query.limit(limit)
+        return query.execute()
+
+    response = execute_with_retry(_run)
     return _normalize_rows(getattr(response, "data", None) or [])
 
 
@@ -251,25 +307,30 @@ def select_row(
 def insert_rows(table: str, rows: list[dict[str, Any]]) -> None:
     if not rows:
         return
-    get_supabase_client().table(table).insert(rows, returning="minimal").execute()
+    execute_with_retry(lambda client: client.table(table).insert(rows, returning="minimal").execute())
 
 
 def upsert_rows(table: str, rows: list[dict[str, Any]], *, on_conflict: str) -> None:
     if not rows:
         return
-    get_supabase_client().table(table).upsert(
-        rows,
-        on_conflict=on_conflict,
-        returning="minimal",
-    ).execute()
+    execute_with_retry(
+        lambda client: client.table(table).upsert(
+            rows,
+            on_conflict=on_conflict,
+            returning="minimal",
+        ).execute()
+    )
 
 
 def update_rows(table: str, values: dict[str, Any], *, filters: list[tuple[str, str, Any]]) -> None:
     if not values:
         return
-    query = get_supabase_client().table(table).update(values, returning="minimal")
-    query = _apply_filters(query, filters)
-    query.execute()
+    def _run(client: Client):
+        query = client.table(table).update(values, returning="minimal")
+        query = _apply_filters(query, filters)
+        return query.execute()
+
+    execute_with_retry(_run)
 
 
 def upload_asset_file(
@@ -288,12 +349,15 @@ def upload_asset_file(
         file_options["content-type"] = guessed_content_type
 
     try:
-        with local_path.open("rb") as file_obj:
-            get_supabase_client().storage.from_(bucket).upload(
-                path=storage_path,
-                file=file_obj,
-                file_options=file_options,
-            )
+        def _run(client: Client):
+            with local_path.open("rb") as file_obj:
+                return client.storage.from_(bucket).upload(
+                    path=storage_path,
+                    file=file_obj,
+                    file_options=file_options,
+                )
+
+        execute_with_retry(_run)
     except Exception as exc:  # pragma: no cover - depends on remote storage
         return {
             "storage_error": str(exc),
@@ -313,7 +377,9 @@ def download_asset_bytes(bucket: str | None, storage_path: str | None) -> bytes 
     if not is_supabase_backend() or not bucket or not storage_path:
         return None
     try:
-        return get_supabase_client().storage.from_(bucket).download(storage_path)
+        return execute_with_retry(
+            lambda client: client.storage.from_(bucket).download(storage_path)
+        )
     except Exception:  # pragma: no cover - depends on remote storage
         return None
 

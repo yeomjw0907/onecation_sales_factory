@@ -16,6 +16,7 @@ from sales_factory.runtime_supabase import (
     get_supabase_key_candidates,
     materialize_local_asset,
     read_asset_text,
+    select_rows,
     verify_schema,
 )
 
@@ -109,6 +110,43 @@ class RuntimeSupabaseTests(unittest.TestCase):
                 runtime_supabase._CLIENT = None
                 verify_schema()
                 self.assertIsNotNone(runtime_supabase._CLIENT)
+
+    def test_select_rows_retries_after_transient_disconnect(self) -> None:
+        class FakeQuery:
+            def __init__(self, *, fail_once: bool) -> None:
+                self.fail_once = fail_once
+                self.executed = False
+
+            def select(self, *_args, **_kwargs):
+                return self
+
+            def in_(self, *_args, **_kwargs):
+                return self
+
+            def limit(self, *_args, **_kwargs):
+                return self
+
+            def execute(self):
+                if self.fail_once and not self.executed:
+                    self.executed = True
+                    raise RuntimeError("Server disconnected without sending a response")
+                return type("Response", (), {"data": [{"id": "asset-1"}]})()
+
+        class FakeClient:
+            def __init__(self, *, fail_once: bool) -> None:
+                self.query = FakeQuery(fail_once=fail_once)
+
+            def table(self, _name: str):
+                return self.query
+
+        clients = [FakeClient(fail_once=True), FakeClient(fail_once=False)]
+
+        with patch("sales_factory.runtime_supabase.get_supabase_client", side_effect=clients), patch(
+            "sales_factory.runtime_supabase.reset_supabase_client"
+        ), patch("sales_factory.runtime_supabase.time.sleep", return_value=None):
+            rows = select_rows("assets", filters=[("id", "in", ["asset-1"])], limit=1)
+
+        self.assertEqual(rows, [{"id": "asset-1"}])
 
     def test_materialize_local_asset_uses_inline_content(self) -> None:
         target_path = ROOT_DIR / "missing-inline-preview.md"
