@@ -56,7 +56,7 @@ def resolve_sender_name() -> str:
     return (
         os.environ.get("SALES_FACTORY_SENDER_NAME", "").strip()
         or os.environ.get("SMTP_FROM_NAME", "").strip()
-        or "염정원"
+        or "대표"
     )
 
 

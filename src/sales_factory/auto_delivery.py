@@ -16,6 +16,22 @@ EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 HANGUL_RE = re.compile(r"[\uac00-\ud7af]")
 HIRAGANA_KATAKANA_RE = re.compile(r"[\u3040-\u30ff]")
 NON_WORD_TEXT_RE = re.compile(r"[^0-9A-Za-z\u3040-\u30ff\uac00-\ud7af]+")
+TITLE_ONLY_IDENTITIES = {
+    "대표",
+    "대표이사",
+    "과장",
+    "부장",
+    "차장",
+    "실장",
+    "팀장",
+    "매니저",
+    "이사",
+    "상무",
+    "전무",
+    "ceo",
+    "director",
+    "manager",
+}
 PUBLIC_EMAIL_DOMAINS = {
     "gmail.com",
     "googlemail.com",
@@ -401,12 +417,24 @@ def body_already_has_closing(body: str, language: str) -> bool:
     return any(marker.lower() in body_lower for marker in markers.get(language, ()))
 
 
+def is_title_only_identity(sender_identity: str) -> bool:
+    normalized = sender_identity.strip().lower()
+    return normalized in TITLE_ONLY_IDENTITIES
+
+
 def format_intro(language: str, sender_identity: str) -> str:
     if "onecation" in sender_identity.lower():
         return {
             "ko": f"안녕하십니까, {sender_identity}입니다.",
             "ja": f"こんにちは。{sender_identity}です。",
             "en": f"Hello, this is {sender_identity}.",
+        }[language]
+
+    if is_title_only_identity(sender_identity):
+        return {
+            "ko": f"안녕하십니까, Onecation의 {sender_identity}입니다.",
+            "ja": f"こんにちは。Onecationの{sender_identity}です。",
+            "en": f"Hello, this is the {sender_identity} at Onecation.",
         }[language]
 
     return {
@@ -421,6 +449,8 @@ def format_signature_block(sender_identity: str, sender_email: str) -> str:
         first_line = "Onecation"
     elif "onecation" in sender_identity.lower():
         first_line = sender_identity
+    elif is_title_only_identity(sender_identity):
+        first_line = f"Onecation {sender_identity}"
     else:
         first_line = f"{sender_identity} | Onecation"
 

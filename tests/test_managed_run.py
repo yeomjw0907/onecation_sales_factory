@@ -33,10 +33,10 @@ class ManagedRunTests(unittest.TestCase):
             test_mode=True,
         )
 
-        with patch.dict("os.environ", {"SALES_FACTORY_SENDER_NAME": "염정원"}, clear=False):
+        with patch.dict("os.environ", {"SALES_FACTORY_SENDER_NAME": "대표"}, clear=False):
             inputs = build_inputs(args)
 
-        self.assertEqual(inputs["sender_name"], "염정원")
+        self.assertEqual(inputs["sender_name"], "대표")
 
     def test_sanitize_identity_disambiguation_output_keeps_only_selected_rows(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

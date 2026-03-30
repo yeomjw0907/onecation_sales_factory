@@ -14,16 +14,16 @@ from sales_factory.output_validation import collect_validation_issues, normalize
 
 
 class OutputValidationTests(unittest.TestCase):
-    def test_resolve_sender_name_defaults_to_yeom_jeongwon(self) -> None:
+    def test_resolve_sender_name_defaults_to_representative(self) -> None:
         with patch.dict("os.environ", {}, clear=True):
-            self.assertEqual(resolve_sender_name(), "염정원")
+            self.assertEqual(resolve_sender_name(), "대표")
 
     def test_normalize_customer_text_replaces_known_sender_placeholders(self) -> None:
-        with patch.dict("os.environ", {"SALES_FACTORY_SENDER_NAME": "염정원"}, clear=False):
+        with patch.dict("os.environ", {"SALES_FACTORY_SENDER_NAME": "대표"}, clear=False):
             text = "안녕하세요, [your name]입니다."
             normalized = normalize_customer_text(text, asset_type="email_sequence")
 
-        self.assertEqual(normalized, "안녕하세요, 염정원입니다.")
+        self.assertEqual(normalized, "안녕하세요, 대표입니다.")
 
     def test_collect_validation_issues_flags_unresolved_placeholders(self) -> None:
         text = "Target local SEO around [city] before launch."

@@ -365,6 +365,49 @@ class AutoDeliveryTests(unittest.TestCase):
             self.assertIn("Hello, this is Minjun Kim from Onecation.", body)
             self.assertIn("Minjun Kim | Onecation", body)
 
+    def test_build_primary_email_payload_formats_title_only_sender_naturally(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            email_path = temp_path / "outreach_emails.md"
+            email_path.write_text(
+                "# Acme Co.\n"
+                "## Primary Outbound Email\n"
+                "- subject: Hello\n"
+                "- preview_line: Preview\n"
+                "- body:\n"
+                "    We reviewed Acme's current website and quote flow.\n"
+                "- cta: Could we schedule a 20-minute call next week?\n",
+                encoding="utf-8",
+            )
+            proposal_path = temp_path / "proposal.md"
+            proposal_path.write_text(
+                "# Acme Co.\n"
+                "## Recommended Direction\n"
+                "We recommend a website relaunch that better shows recent work.\n",
+                encoding="utf-8",
+            )
+            pdf_path = temp_path / "proposal.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4")
+
+            with patch.dict(
+                "os.environ",
+                {
+                    "SMTP_USER": "ops@onecation.co.kr",
+                    "SALES_FACTORY_SENDER_NAME": "대표",
+                },
+                clear=False,
+            ):
+                _subject, body, _attachments = build_primary_email_payload(
+                    [
+                        {"asset_type": "email_sequence", "path": str(email_path), "metadata_json": {}},
+                        {"asset_type": "proposal", "path": str(proposal_path), "metadata_json": {}},
+                        {"asset_type": "proposal_pdf", "path": str(pdf_path), "metadata_json": {}},
+                    ]
+                )
+
+            self.assertIn("Hello, this is the 대표 at Onecation.", body)
+            self.assertIn("Onecation 대표", body)
+
     def test_build_primary_email_payload_falls_back_to_docx_attachment(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
