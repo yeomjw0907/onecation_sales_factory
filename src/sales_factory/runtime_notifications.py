@@ -85,6 +85,12 @@ def send_slack_message(text: str, blocks: list | None = None) -> None:
     webhook_url = os.environ.get("SLACK_WEBHOOK_URL", "").strip()
     if not webhook_url:
         return
+    try:
+        from sales_factory.slack_review import ensure_slack_socket_mode_started
+
+        ensure_slack_socket_mode_started()
+    except Exception:
+        pass
     payload: dict = {"text": text}
     if blocks:
         payload["blocks"] = blocks

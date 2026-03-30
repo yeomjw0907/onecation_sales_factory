@@ -15,7 +15,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-web = ["streamlit>=1.28.0"]
+web = [
+    "slack-bolt>=1.22.0",
+    "streamlit>=1.28.0",
+]
 
 [project.scripts]
 sales_factory = "sales_factory.main:run"

@@ -725,6 +725,22 @@ def list_approval_items(status: str | None = None, *, limit: int = 200) -> list[
     )
 
 
+def get_approval_item(item_id: str) -> dict[str, Any] | None:
+    if is_supabase_backend():
+        rows = supabase_select_rows("approval_items", filters=[("id", "eq", item_id)], limit=1)
+        return rows[0] if rows else None
+    rows = fetch_all(
+        """
+        SELECT *
+        FROM approval_items
+        WHERE id = ?
+        LIMIT 1
+        """,
+        (item_id,),
+    )
+    return rows[0] if rows else None
+
+
 def list_approval_items_for_run(run_id: str, status: str | None = None) -> list[dict[str, Any]]:
     if is_supabase_backend():
         filters: list[tuple[str, str, Any]] = [("run_id", "eq", run_id)]

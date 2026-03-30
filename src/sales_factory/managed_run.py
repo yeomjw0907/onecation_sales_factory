@@ -45,6 +45,7 @@ from sales_factory.runtime_db import (
     update_task,
 )
 from sales_factory.runtime_notifications import send_alert_email, send_slack_message
+from sales_factory.slack_review import build_review_ready_slack_blocks
 from sales_factory.runtime_supabase import read_asset_text
 from sales_factory.strategy_runtime import build_strategy_snapshot
 
@@ -971,9 +972,18 @@ def run_managed(args: argparse.Namespace) -> str:
             send_runtime_notification(run_id, args.notify_email, subject, body)
 
         if approval_count:
+            slack_blocks = build_review_ready_slack_blocks(
+                run_id=run_id,
+                target_country=args.target_country,
+                inputs=inputs,
+                approval_count=approval_count,
+                total_tokens=total_tokens,
+                estimated_cost=estimated_cost,
+            )
             send_slack_message(
                 f"✅ 파이프라인 완료 — 검토 대기 {approval_count}건 | 국가: {args.target_country} | "
-                f"비용: ${estimated_cost:.4f} | ID: {run_id[:8]}"
+                f"비용: ${estimated_cost:.4f} | ID: {run_id[:8]}",
+                blocks=slack_blocks,
             )
         else:
             send_slack_message(
