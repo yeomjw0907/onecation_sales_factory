@@ -207,9 +207,9 @@ competitor_analysis_task:
     - why_now: ...
 
     ## Competitor Table
-    A markdown table with these columns:
-    competitor_name | website_quality | key_offer | trust_signals |
-    acquisition_motion | strengths | weaknesses
+    A markdown table with human-readable column headers written in the same language as this proposal.
+    Columns to include (translate headers to match the proposal language):
+    Competitor Name | Website Quality | Key Offering | Trust Signals | Customer Acquisition | Strengths | Weaknesses
 
     ## Strengths To Amplify
     2-4 bullets about the target company's hidden strengths or angles worth
@@ -393,12 +393,14 @@ proposal_task:
     1 short paragraph naming the recommended offer direction and why it fits.
 
     ## 30-60-90 Day Execution Plan
-    A markdown table with these columns:
-    phase | what_we_do | expected_business_effect
+    A markdown table with human-readable column headers written in the same language as this proposal.
+    Columns to include (translate headers to match the proposal language):
+    Phase | What We Do | Expected Business Effect
 
     ## Recommended Packages
-    A markdown table with these columns:
-    package_name | best_for | what_is_included | price_range | notes
+    A markdown table with human-readable column headers written in the same language as this proposal.
+    Columns to include (translate headers to match the proposal language):
+    Package Name | Best For | What's Included | Price Range | Notes
 
     Include:
     - one recommended package
