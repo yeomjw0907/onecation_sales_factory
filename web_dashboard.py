@@ -1634,6 +1634,24 @@ def render_settings() -> None:
     if auto_send_settings.canary_email:
         st.write(f"카나리 수신 메일: `{auto_send_settings.canary_email}`")
     st.divider()
+    st.markdown("### 최근 실행 로그")
+    log_dir = PROJECT_ROOT / ".runtime" / "logs"
+    if log_dir.exists():
+        log_files = sorted(log_dir.glob("dashboard-run-*.log"), reverse=True)[:5]
+        if log_files:
+            selected_log = st.selectbox("로그 파일", [f.name for f in log_files])
+            log_path = log_dir / selected_log
+            try:
+                content = log_path.read_text(encoding="utf-8", errors="replace")
+                st.code(content[-4000:] if len(content) > 4000 else content or "(비어있음)", language="text")
+            except Exception as e:
+                st.warning(f"로그 읽기 실패: {e}")
+        else:
+            st.info("로그 파일이 없습니다.")
+    else:
+        st.info(f"로그 디렉토리가 없습니다: {log_dir}")
+
+    st.divider()
     st.markdown("### 구성현황")
     st.caption("메인 파이프라인 부서와 지원 조직이 어떤 역할을 맡는지 정리한 표입니다.")
 
