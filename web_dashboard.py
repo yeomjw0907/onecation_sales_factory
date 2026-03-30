@@ -820,8 +820,13 @@ def render_dashboard(latest_run: dict[str, Any] | None) -> None:
     st.subheader("현재 현황")
 
     if not latest_run:
-        st.info("아직 실행 기록이 없습니다.")
+        if st.session_state.get("run_just_launched"):
+            st.info("파이프라인을 초기화하고 있습니다. 잠시 후 자동으로 갱신됩니다...")
+        else:
+            st.info("아직 실행 기록이 없습니다.")
         return
+
+    st.session_state.pop("run_just_launched", None)
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("상태", display_status(latest_run.get("status")))
@@ -859,7 +864,38 @@ def render_dashboard(latest_run: dict[str, Any] | None) -> None:
 
     tasks = list_tasks(latest_run["id"])
     if not tasks:
+        if latest_run.get("status") == "running":
+            st.info("파이프라인 시작 중... 첫 번째 에이전트가 준비되면 여기에 표시됩니다.")
         return
+
+    running_tasks = [t for t in tasks if t.get("status") == "running"]
+    if running_tasks:
+        rt = running_tasks[0]
+        rt_members = get_department_members(rt.get("task_name"))
+        rt_agent = rt_members[0] if rt_members else None
+        agent_name = rt_agent["name"] if rt_agent else display_task_name(rt.get("task_name"))
+        agent_role = rt_agent.get("role", "") if rt_agent else ""
+        st.markdown(
+            f"""
+            <div style="border:1px solid #60a5fa;border-radius:12px;background:#10233d;
+            padding:16px 20px;margin-bottom:16px;display:flex;align-items:center;gap:16px;">
+                <div style="width:12px;height:12px;border-radius:50%;background:#60a5fa;
+                box-shadow:0 0 0 3px rgba(96,165,250,0.3);flex-shrink:0;"></div>
+                <div>
+                    <div style="font-size:11px;font-weight:800;letter-spacing:0.06em;
+                    text-transform:uppercase;color:#60a5fa;margin-bottom:4px;">지금 일하는 에이전트</div>
+                    <div style="font-size:18px;font-weight:800;line-height:1.2;">{html.escape(agent_name)}</div>
+                    {f'<div style="font-size:13px;opacity:0.75;margin-top:3px;">{html.escape(agent_role)}</div>' if agent_role else ""}
+                    <div style="font-size:12px;opacity:0.6;margin-top:4px;">
+                        작업: {html.escape(display_task_name(rt.get("task_name")))} &nbsp;·&nbsp;
+                        모델: {html.escape(rt.get("model_name") or "-")} &nbsp;·&nbsp;
+                        토큰: {int(rt.get("total_tokens", 0) or 0):,}
+                    </div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
     render_department_board(tasks, latest_run)
 
@@ -1711,6 +1747,7 @@ def main() -> None:
                     notify_email=notify_email.strip(),
                     test_mode=test_mode,
                 )
+                st.session_state["run_just_launched"] = True
                 set_ui_notice("success", "실행을 시작했습니다. 실행 현황 탭에서 진행 상태를 확인하세요.")
                 st.rerun()
 
