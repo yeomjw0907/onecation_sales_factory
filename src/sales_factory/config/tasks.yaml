@@ -479,6 +479,9 @@ email_outreach_task:
     - Mention one company-specific observation.
     - Mention one market or competitor insight.
     - State one concrete way Onecation would help.
+    - In the primary email body, state the exact commercial offer in one plain sentence.
+      Name whether this is a website relaunch, website maintenance recovery,
+      new website build, or website-plus-marketing execution support.
     - Use one clear CTA only.
     - Keep the tone respectful and professional.
       - Avoid generic praise and template filler.
@@ -490,6 +493,10 @@ email_outreach_task:
 
     The first email should make it clear that real work was already done:
     review, diagnosis, competitor context, and tailored execution ideas.
+    The primary email body must also include:
+    - a short opening sentence that identifies Onecation
+    - a short, explicit offer sentence that says what we want to sell
+    - a short, polite closing sentence before the CTA field
     If website access was uncertain, describe it as an audit verification issue,
     not as a hard factual claim that the company has no website.
     Never cite raw audit-environment error strings such as DNS, TLS, name
@@ -508,7 +515,10 @@ email_outreach_task:
     - subject: ...
     - preview_line: ...
     - body:
-      A ready-to-send email body.
+      A ready-to-send email body. It must contain:
+      1. a short Onecation introduction near the top
+      2. one explicit sentence naming the proposed offer
+      3. one polite closing sentence before the CTA
     - cta: ...
 
     ## Follow Up 1
@@ -547,6 +557,8 @@ email_localization_task:
       - Translate only the customer-facing values into {proposal_language}.
       - Keep company-specific facts, CTA intent, and offer direction aligned with
         the canonical English draft and the localized proposal.
+      - Keep the Onecation introduction, explicit offer sentence, and polite
+        closing sentence intact in intent, even when the wording is localized.
       - Keep geography aligned with the verified upstream location. Do not swap
         in a different city, state, metro area, or competitor region.
       - Do not leave placeholders such as [your name], [contact name], or [city].

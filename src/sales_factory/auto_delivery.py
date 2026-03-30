@@ -7,11 +7,14 @@ from pathlib import Path
 from typing import Any
 
 from sales_factory.delivery_manager import extract_domain, normalize_company_key
+from sales_factory.output_validation import resolve_sender_name
 from sales_factory.proposal_quality import evaluate_proposal_path, evaluate_proposal_text
 from sales_factory.runtime_notifications import send_email_message
 from sales_factory.runtime_supabase import is_render_environment, materialize_local_asset, read_asset_text
 
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+HANGUL_RE = re.compile(r"[\uac00-\ud7af]")
+HIRAGANA_KATAKANA_RE = re.compile(r"[\u3040-\u30ff]")
 PUBLIC_EMAIL_DOMAINS = {
     "gmail.com",
     "googlemail.com",
@@ -270,10 +273,12 @@ def assess_company_sendability(
     )
 
 
-def parse_primary_email_asset(path: Path, metadata: dict[str, Any] | None = None) -> tuple[str, str]:
+def parse_primary_email_asset(path: Path, metadata: dict[str, Any] | None = None) -> tuple[str, str, str, str]:
     text = read_asset_text(path, metadata)
     subject = ""
+    preview_line = ""
     body_lines: list[str] = []
+    cta = ""
     in_primary = False
     in_body = False
 
@@ -291,10 +296,15 @@ def parse_primary_email_asset(path: Path, metadata: dict[str, Any] | None = None
             subject = stripped.split(":", 1)[1].strip()
             in_body = False
             continue
+        if stripped.startswith("- preview_line:"):
+            preview_line = stripped.split(":", 1)[1].strip()
+            in_body = False
+            continue
         if stripped.startswith("- body:"):
             in_body = True
             continue
-        if stripped.startswith("- cta:") or stripped.startswith("- preview_line:"):
+        if stripped.startswith("- cta:"):
+            cta = stripped.split(":", 1)[1].strip()
             in_body = False
             continue
         if in_body:
@@ -303,23 +313,126 @@ def parse_primary_email_asset(path: Path, metadata: dict[str, Any] | None = None
     body = "\n".join(body_lines).strip()
     if not subject or not body:
         raise RuntimeError(f"{path.name}에서 1차 메일을 파싱하지 못했습니다.")
-    return subject, body
+    return subject, body, preview_line, cta
+
+
+def detect_email_language(text: str) -> str:
+    if HANGUL_RE.search(text):
+        return "ko"
+    if HIRAGANA_KATAKANA_RE.search(text):
+        return "ja"
+    return "en"
+
+
+def resolve_sender_identity(language: str) -> str:
+    sender_name = resolve_sender_name().strip()
+    if sender_name and sender_name.lower() != "onecation":
+        return sender_name
+
+    return {
+        "ko": "Onecation 팀",
+        "ja": "Onecationチーム",
+        "en": "the Onecation team",
+    }.get(language, "Onecation")
+
+
+def extract_proposal_direction(asset_rows: list[dict[str, Any]]) -> str:
+    proposal_asset = next((row for row in asset_rows if row["asset_type"] == "proposal"), None)
+    if not proposal_asset:
+        return ""
+
+    metadata = parse_json_value(proposal_asset.get("metadata_json"), {})
+    text = read_asset_text(Path(proposal_asset["path"]), metadata)
+    lines = text.splitlines()
+    capture = False
+    captured: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped == "## Recommended Direction":
+            capture = True
+            continue
+        if capture and stripped.startswith("## "):
+            break
+        if capture and stripped:
+            captured.append(stripped)
+
+    return " ".join(captured).strip()
+
+
+def compose_primary_email_body(body: str, *, cta: str, offer_summary: str) -> str:
+    language = detect_email_language(body)
+    sender_identity = resolve_sender_identity(language)
+    sender_email = os.environ.get("SMTP_USER", "").strip()
+
+    intro_map = {
+        "ko": f"안녕하세요. {sender_identity}입니다.",
+        "ja": f"こんにちは。{sender_identity}です。",
+        "en": f"Hello, this is {sender_identity}.",
+    }
+    offer_map = {
+        "ko": "이번에 제안드리는 핵심은 다음과 같습니다: ",
+        "ja": "今回ご提案したい主な内容は次のとおりです: ",
+        "en": "The core offer we are proposing is: ",
+    }
+    closing_map = {
+        "ko": "검토해 주셔서 감사합니다. 편하신 시간에 회신 주시면 제안 내용을 더 구체적으로 설명드리겠습니다.",
+        "ja": "ご確認ありがとうございます。ご都合のよいタイミングでご返信いただければ、提案内容を詳しくご説明します。",
+        "en": "Thank you for taking a look. If this is relevant, I would be glad to walk you through the proposal in more detail.",
+    }
+
+    chunks: list[str] = []
+    if "onecation" not in body.lower():
+        chunks.append(intro_map[language])
+
+    chunks.append(body.strip())
+
+    if offer_summary:
+        chunks.append(f"{offer_map[language]}{offer_summary}")
+
+    if cta:
+        chunks.append(cta)
+
+    chunks.append(closing_map[language])
+
+    signature_lines = [sender_identity, "Onecation"]
+    if sender_email:
+        signature_lines.append(sender_email)
+    chunks.append("\n".join(signature_lines))
+
+    return "\n\n".join(part for part in chunks if part and part.strip())
+
+
+def collect_primary_attachments(asset_rows: list[dict[str, Any]]) -> list[Path]:
+    attachments: list[Path] = []
+    candidate_found = False
+    for asset_type in ("proposal_pdf", "proposal_docx"):
+        asset = next((row for row in asset_rows if row["asset_type"] == asset_type), None)
+        if not asset:
+            continue
+        candidate_found = True
+        attachment_metadata = parse_json_value(asset.get("metadata_json"), {})
+        attachment_path = materialize_local_asset(Path(asset["path"]), attachment_metadata)
+        if attachment_path:
+            attachments.append(attachment_path)
+            break
+    if candidate_found and not attachments:
+        raise RuntimeError("제안서 첨부 파일을 실제 메일 첨부로 준비하지 못했습니다.")
+    return attachments
 
 
 def build_primary_email_payload(asset_rows: list[dict[str, Any]]) -> tuple[str, str, list[Path]]:
     email_asset = next((row for row in asset_rows if row["asset_type"] == "email_sequence"), None)
-    proposal_pdf_asset = next((row for row in asset_rows if row["asset_type"] == "proposal_pdf"), None)
     if not email_asset:
         raise RuntimeError("이 패키지에는 메일 시퀀스 산출물이 없습니다.")
 
     email_metadata = parse_json_value(email_asset.get("metadata_json"), {})
-    subject, body = parse_primary_email_asset(Path(email_asset["path"]), email_metadata)
-    attachments: list[Path] = []
-    if proposal_pdf_asset:
-        attachment_metadata = parse_json_value(proposal_pdf_asset.get("metadata_json"), {})
-        attachment_path = materialize_local_asset(Path(proposal_pdf_asset["path"]), attachment_metadata)
-        if attachment_path:
-            attachments.append(attachment_path)
+    subject, body, _preview_line, cta = parse_primary_email_asset(Path(email_asset["path"]), email_metadata)
+    body = compose_primary_email_body(
+        body,
+        cta=cta,
+        offer_summary=extract_proposal_direction(asset_rows),
+    )
+    attachments = collect_primary_attachments(asset_rows)
     return subject, body, attachments
 
 

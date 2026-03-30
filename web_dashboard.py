@@ -25,7 +25,7 @@ except ImportError:
     sys.exit(1)
 
 from sales_factory.proposal_quality import evaluate_proposal_path, evaluate_proposal_text
-from sales_factory.auto_delivery import get_auto_send_settings
+from sales_factory.auto_delivery import build_primary_email_payload, get_auto_send_settings
 from sales_factory.runtime_assets import route_rejection
 from sales_factory.runtime_copilot import answer_ops_question
 from sales_factory.runtime_db import (
@@ -824,19 +824,7 @@ def send_test_outbound_email(
     asset_rows: list[dict[str, Any]],
     recipient: str,
 ) -> None:
-    email_asset = next((row for row in asset_rows if row["asset_type"] == "email_sequence"), None)
-    proposal_pdf_asset = next((row for row in asset_rows if row["asset_type"] == "proposal_pdf"), None)
-    if not email_asset:
-        raise RuntimeError("이 패키지에는 메일 시퀀스 산출물이 없습니다.")
-
-    email_metadata = parse_json_field(email_asset.get("metadata_json"), {})
-    subject, body = parse_primary_email_asset(Path(email_asset["path"]), email_metadata)
-    attachments: list[Path] = []
-    if proposal_pdf_asset:
-        attachment_metadata = parse_json_field(proposal_pdf_asset.get("metadata_json"), {})
-        attachment_path = materialize_local_asset(Path(proposal_pdf_asset["path"]), attachment_metadata)
-        if attachment_path:
-            attachments.append(attachment_path)
+    subject, body, attachments = build_primary_email_payload(asset_rows)
 
     send_email_message(
         subject=f"[TEST] {subject}",

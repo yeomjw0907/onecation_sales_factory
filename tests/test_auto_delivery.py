@@ -14,6 +14,7 @@ if str(SRC_DIR) not in sys.path:
 from sales_factory.auto_delivery import (
     AutoSendSettings,
     assess_company_sendability,
+    build_primary_email_payload,
     execute_auto_send,
     get_auto_send_settings,
     load_verified_recipients,
@@ -229,6 +230,82 @@ class AutoDeliveryTests(unittest.TestCase):
             self.assertEqual(result["status"], "sent")
             self.assertEqual(result["recipient"], "ops@example.com")
             mocked_send.assert_called_once()
+
+    def test_build_primary_email_payload_adds_offer_cta_signature_and_pdf_attachment(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            email_path = temp_path / "outreach_emails.md"
+            email_path.write_text(
+                "# Acme Co.\n"
+                "## Primary Outbound Email\n"
+                "- subject: Hello\n"
+                "- preview_line: Preview\n"
+                "- body:\n"
+                "    We reviewed Acme's current web presence.\n"
+                "- cta: Could we schedule a 30-minute review next week?\n",
+                encoding="utf-8",
+            )
+            proposal_path = temp_path / "proposal.md"
+            proposal_path.write_text(
+                "# Acme Co.\n"
+                "## Recommended Direction\n"
+                "We recommend a website relaunch with ongoing maintenance support.\n",
+                encoding="utf-8",
+            )
+            pdf_path = temp_path / "proposal.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4")
+
+            with patch.dict("os.environ", {"SMTP_USER": "ops@onecation.co.kr"}, clear=False):
+                subject, body, attachments = build_primary_email_payload(
+                    [
+                        {"asset_type": "email_sequence", "path": str(email_path), "metadata_json": {}},
+                        {"asset_type": "proposal", "path": str(proposal_path), "metadata_json": {}},
+                        {"asset_type": "proposal_pdf", "path": str(pdf_path), "metadata_json": {}},
+                    ]
+                )
+
+            self.assertEqual(subject, "Hello")
+            self.assertIn("Onecation", body)
+            self.assertIn("website relaunch with ongoing maintenance support", body)
+            self.assertIn("Could we schedule a 30-minute review next week?", body)
+            self.assertIn("ops@onecation.co.kr", body)
+            self.assertEqual(attachments, [pdf_path])
+
+    def test_build_primary_email_payload_falls_back_to_docx_attachment(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            email_path = temp_path / "outreach_emails.md"
+            email_path.write_text(
+                "# Acme Co.\n"
+                "## Primary Outbound Email\n"
+                "- subject: Hello\n"
+                "- preview_line: Preview\n"
+                "- body:\n"
+                "    Hello there.\n"
+                "- cta: Reply\n",
+                encoding="utf-8",
+            )
+            proposal_path = temp_path / "proposal.md"
+            proposal_path.write_text(
+                "# Acme Co.\n"
+                "## Recommended Direction\n"
+                "We recommend a website maintenance recovery package.\n",
+                encoding="utf-8",
+            )
+            docx_path = temp_path / "proposal.docx"
+            docx_path.write_bytes(b"docx")
+
+            subject, body, attachments = build_primary_email_payload(
+                [
+                    {"asset_type": "email_sequence", "path": str(email_path), "metadata_json": {}},
+                    {"asset_type": "proposal", "path": str(proposal_path), "metadata_json": {}},
+                    {"asset_type": "proposal_docx", "path": str(docx_path), "metadata_json": {}},
+                ]
+            )
+
+            self.assertEqual(subject, "Hello")
+            self.assertIn("website maintenance recovery package", body)
+            self.assertEqual(attachments, [docx_path])
 
 
 if __name__ == "__main__":

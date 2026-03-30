@@ -55,13 +55,17 @@ def send_email_message(
     if not from_email:
         raise RuntimeError("SMTP_USER is not configured.")
 
-    message = MIMEMultipart("alternative")
+    message = MIMEMultipart("mixed")
     message["From"] = from_email
     message["To"] = to_email
     message["Subject"] = subject
-    message.attach(MIMEText(body_text, "plain", "utf-8"))
+
+    alternative = MIMEMultipart("alternative")
+    alternative.attach(MIMEText(body_text, "plain", "utf-8"))
     if body_html:
-        message.attach(MIMEText(body_html, "html", "utf-8"))
+        alternative.attach(MIMEText(body_html, "html", "utf-8"))
+    message.attach(alternative)
+
     for attachment_path in attachment_paths or []:
         if not attachment_path.exists() or not attachment_path.is_file():
             continue
