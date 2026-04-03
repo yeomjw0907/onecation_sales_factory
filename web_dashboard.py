@@ -39,7 +39,7 @@ from sales_factory.segment_calendar import (
     list_upcoming_segment_calendar_entries,
     mark_segment_calendar_entry_launched,
 )
-from sales_factory.slack_review import prime_slack_review_handlers
+from sales_factory.slack_review import ensure_slack_socket_mode_started, prime_slack_review_handlers
 from sales_factory.runtime_db import (
     DB_PATH,
     PROJECT_ROOT,
@@ -583,6 +583,7 @@ def summarize_run_issue(run_row: dict[str, Any] | None, tasks: list[dict[str, An
     if status == "waiting_approval":
         if waiting_items_count <= 0:
             return {
+                "kind": "waiting_queue_empty",
                 "severity": "warning",
                 "title": "검토 대기 누락",
                 "summary": "상태는 검토 대기인데 실제 승인 항목이 연결되지 않았습니다.",
@@ -590,6 +591,7 @@ def summarize_run_issue(run_row: dict[str, Any] | None, tasks: list[dict[str, An
                 "raw_error": error_message,
             }
         return {
+            "kind": "waiting_for_review",
             "severity": "warning",
             "title": "사람 검토 대기",
             "summary": f"지금 사람이 판단해야 할 항목이 {waiting_items_count}건 남아 있습니다.",
@@ -602,6 +604,7 @@ def summarize_run_issue(run_row: dict[str, Any] | None, tasks: list[dict[str, An
 
     if any(keyword in lowered_error for keyword in ("503", "overloaded", "temporarily overloaded", "retrying transient llm failure")):
         return {
+            "kind": "llm_retry_exhausted",
             "severity": "error",
             "title": "LLM 재시도 초과",
             "summary": "모델 과부하 또는 일시 오류가 계속되어 자동 재시도 후에도 완료하지 못했습니다.",
@@ -610,6 +613,7 @@ def summarize_run_issue(run_row: dict[str, Any] | None, tasks: list[dict[str, An
         }
     if "slack" in lowered_error and any(keyword in lowered_error for keyword in ("socket", "connection", "timeout", "handshake")):
         return {
+            "kind": "slack_connection",
             "severity": "error",
             "title": "Slack 연결 지연",
             "summary": "Slack 버튼 또는 알림 연결이 제때 붙지 않아 흐름이 멈췄습니다.",
@@ -626,6 +630,7 @@ def summarize_run_issue(run_row: dict[str, Any] | None, tasks: list[dict[str, An
         )
     ):
         return {
+            "kind": "no_verified_leads",
             "severity": "error",
             "title": "리드 없음",
             "summary": "검증을 통과한 회사가 없어 제안서 단계로 넘어가지 못했습니다.",
@@ -634,6 +639,7 @@ def summarize_run_issue(run_row: dict[str, Any] | None, tasks: list[dict[str, An
         }
     if "approval" in lowered_error and any(keyword in lowered_error for keyword in ("missing", "queue", "review")):
         return {
+            "kind": "approval_queue_missing",
             "severity": "error",
             "title": "검토 대기 누락",
             "summary": "승인 단계로 이어지는 검토 항목을 만들지 못해 흐름이 끊겼습니다.",
@@ -642,6 +648,7 @@ def summarize_run_issue(run_row: dict[str, Any] | None, tasks: list[dict[str, An
         }
     if any(keyword in lowered_error for keyword in ("stale", "heartbeat")):
         return {
+            "kind": "stale_run",
             "severity": "error",
             "title": "실행이 오래 멈춤",
             "summary": "하트비트가 끊겨 시스템이 실행을 자동 실패 처리했습니다.",
@@ -651,6 +658,7 @@ def summarize_run_issue(run_row: dict[str, Any] | None, tasks: list[dict[str, An
 
     stage_label = display_task_name(focus_task_name) if focus_task_name else "실행"
     return {
+        "kind": "generic_failure",
         "severity": "error",
         "title": f"{stage_label} 실패",
         "summary": f"{stage_label} 단계에서 예외가 발생해 실행이 중단되었습니다.",
@@ -1430,6 +1438,105 @@ def launch_rework_for_approval(item: dict[str, Any], reason: str) -> tuple[bool,
         },
     )
     return True, f"{company_name or '선택 항목'} 재작업을 다시 시작했습니다."
+
+
+def relaunch_run_with_same_inputs(run_row: dict[str, Any] | None) -> tuple[bool, str]:
+    if not run_row or not run_row.get("id"):
+        return False, "원본 실행 정보를 찾지 못했습니다."
+
+    running = query_running_run()
+    if running:
+        return False, f"다른 실행이 이미 진행 중입니다. {str(running.get('id') or '')[:8]}"
+
+    inputs = get_run_inputs(run_row)
+    metadata = get_run_metadata(run_row)
+    target_country = str(inputs.get("target_country") or run_row.get("target_country") or "KR")
+    lead_mode = str(inputs.get("lead_mode") or run_row.get("lead_mode") or "region_or_industry")
+    lead_query = str(inputs.get("lead_query") or run_row.get("lead_query") or "")
+    max_companies = int(inputs.get("max_companies") or run_row.get("max_companies") or 1)
+    notify_email = str(
+        metadata.get("notify_email")
+        or st.session_state.get("alert_email_input")
+        or os.environ.get("ALERT_EMAIL_TO", ALERT_EMAIL_DEFAULT)
+    ).strip()
+
+    launch_background_run(
+        target_country=target_country,
+        lead_query=lead_query,
+        lead_mode=lead_mode,
+        max_companies=max_companies,
+        notify_email=notify_email,
+        test_mode=bool(run_row.get("test_mode", 1)),
+        trigger_source=f"retry:{run_row.get('trigger_source') or 'dashboard'}",
+        segment_id=str(inputs.get("segment_id") or metadata.get("segment_id") or ""),
+        segment_label=str(inputs.get("segment_label") or metadata.get("segment_label") or ""),
+        segment_brief=str(inputs.get("segment_brief") or metadata.get("segment_brief") or ""),
+    )
+    st.session_state["dashboard_auto_refresh_enable_pending"] = True
+    st.session_state["run_just_launched"] = True
+    return True, "같은 조건으로 다시 실행했습니다."
+
+
+def reconcile_run_review_state(run_row: dict[str, Any] | None) -> tuple[bool, str]:
+    if not run_row or not run_row.get("id"):
+        return False, "검토 상태를 다시 계산할 실행이 없습니다."
+    finalize_run_review_state(str(run_row["id"]))
+    return True, "검토 상태를 다시 계산했습니다."
+
+
+def restart_slack_review_socket() -> tuple[bool, str]:
+    try:
+        started = ensure_slack_socket_mode_started()
+    except Exception as exc:
+        return False, f"Slack 연결을 다시 시작하지 못했습니다: {exc}"
+    if not started:
+        return False, "Slack 토큰 또는 앱 설정을 확인해주세요."
+    return True, "Slack 연결을 다시 시작했습니다."
+
+
+def render_run_issue_actions(run_row: dict[str, Any] | None, issue: dict[str, str]) -> None:
+    issue_kind = str(issue.get("kind") or "")
+    actions: list[dict[str, str]] = []
+
+    if issue_kind in {"stale_run", "llm_retry_exhausted", "generic_failure", "approval_queue_missing", "no_verified_leads"}:
+        actions.append({"key": "retry", "label": "같은 조건으로 다시 실행", "style": "primary"})
+    if issue_kind == "slack_connection":
+        actions.append({"key": "restart_slack", "label": "Slack 연결 다시 시작", "style": "secondary"})
+        actions.append({"key": "retry", "label": "같은 조건으로 다시 실행", "style": "primary"})
+    if issue_kind in {"waiting_queue_empty", "waiting_for_review"}:
+        actions.append({"key": "reconcile_review", "label": "검토 상태 다시 계산", "style": "secondary"})
+    if issue_kind in {"stale_run", "generic_failure", "llm_retry_exhausted"}:
+        actions.append({"key": "refresh", "label": "화면 새로고침", "style": "secondary"})
+
+    if not actions:
+        return
+
+    st.caption("바로 조치")
+    columns = st.columns(len(actions))
+    for index, action in enumerate(actions):
+        button_type = "primary" if action["style"] == "primary" and index == 0 else "secondary"
+        if not columns[index].button(
+            action["label"],
+            key=f"run_issue_{issue_kind}_{action['key']}_{run_row.get('id') if run_row else 'none'}",
+            use_container_width=True,
+            type=button_type,
+        ):
+            continue
+
+        if action["key"] == "retry":
+            launched, message = relaunch_run_with_same_inputs(run_row)
+            set_ui_notice("success" if launched else "warning", message)
+            st.rerun()
+        if action["key"] == "restart_slack":
+            started, message = restart_slack_review_socket()
+            set_ui_notice("success" if started else "warning", message)
+            st.rerun()
+        if action["key"] == "reconcile_review":
+            updated, message = reconcile_run_review_state(run_row)
+            set_ui_notice("success" if updated else "warning", message)
+            st.rerun()
+        if action["key"] == "refresh":
+            st.rerun()
 
 
 def read_asset_content(path: Path, metadata: dict[str, Any] | None = None) -> str:
@@ -2469,6 +2576,7 @@ def render_dashboard(latest_run: dict[str, Any] | None) -> None:
 
     if issue:
         render_run_issue_banner(issue)
+        render_run_issue_actions(latest_run, issue)
         if issue.get("raw_error"):
             with st.expander("원문 오류 보기", expanded=False):
                 st.code(issue["raw_error"], language="text")

@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 import os
 import threading
+from pathlib import Path
 from typing import Any
 
+from sales_factory.auto_delivery import build_primary_email_payload
 from sales_factory.review_ops import (
     approve_approval_item,
     asset_preview_text,
@@ -14,6 +16,7 @@ from sales_factory.review_ops import (
 )
 from sales_factory.runtime_db import get_approval_item, list_approval_items_for_run
 from sales_factory.runtime_notifications import load_env_file
+from sales_factory.runtime_supabase import materialize_local_asset
 
 APP_URL_FALLBACK = "https://onecation-sales-factory.onrender.com"
 _SOCKET_MODE_LOCK = threading.Lock()
@@ -188,6 +191,39 @@ def _post_ephemeral(client: Any, *, channel_id: str | None, user_id: str | None,
     client.chat_postEphemeral(channel=channel_id, user=user_id, text=text)
 
 
+def _notify_action_result(client: Any, body: dict[str, Any], *, text: str, title: str = "처리 결과") -> None:
+    view = body.get("view") or {}
+    view_id = view.get("id")
+    if view_id:
+        client.views_update(
+            view_id=view_id,
+            hash=view.get("hash"),
+            view={
+                "type": "modal",
+                "title": {"type": "plain_text", "text": title[:24]},
+                "close": {"type": "plain_text", "text": "닫기"},
+                "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": text}}],
+            },
+        )
+        return
+    _post_ephemeral(
+        client,
+        channel_id=body.get("channel", {}).get("id"),
+        user_id=body.get("user", {}).get("id"),
+        text=text,
+    )
+
+
+def _notify_channel_or_dm(client: Any, *, channel_id: str | None, user_id: str | None, text: str) -> None:
+    if channel_id and user_id:
+        _post_ephemeral(client, channel_id=channel_id, user_id=user_id, text=text)
+        return
+    if user_id:
+        dm_channel = _open_user_dm(client, user_id)
+        if dm_channel:
+            client.chat_postMessage(channel=dm_channel, text=text)
+
+
 def _build_preview_modal(item: dict[str, Any]) -> dict[str, Any]:
     asset_rows = load_approval_assets(item)
     proposal_preview = asset_preview_text(asset_rows, "proposal", limit=1400)
@@ -227,6 +263,166 @@ def _build_preview_modal(item: dict[str, Any]) -> dict[str, Any]:
                 ],
             },
         ],
+    }
+
+
+def _truncate_for_slack(text: str, *, limit: int = 2600) -> str:
+    normalized = (text or "").strip()
+    if len(normalized) <= limit:
+        return normalized or "-"
+    return normalized[: limit - 1].rstrip() + "…"
+
+
+def _build_email_preview(asset_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    try:
+        subject, body, attachments = build_primary_email_payload(asset_rows)
+    except Exception:
+        subject = "-"
+        body = asset_preview_text(asset_rows, "email_sequence", limit=2200)
+        attachments = []
+    return {
+        "subject": subject or "-",
+        "body": body or "-",
+        "attachments": attachments,
+        "attachment_names": [path.name for path in attachments],
+    }
+
+
+def _resolve_attachment_for_slack(item: dict[str, Any], asset_type: str) -> Path | None:
+    asset_rows = load_approval_assets(item)
+    asset_row = next((row for row in asset_rows if row.get("asset_type") == asset_type), None)
+    if not asset_row:
+        return None
+    metadata = parse_json_value(asset_row.get("metadata_json"), {})
+    return materialize_local_asset(Path(str(asset_row.get("path") or "")), metadata)
+
+
+def _open_user_dm(client: Any, user_id: str) -> str | None:
+    response = client.conversations_open(users=user_id)
+    channel = response.get("channel") or {}
+    return channel.get("id")
+
+
+def _send_attachment_to_user_dm(client: Any, *, user_id: str, item: dict[str, Any], asset_type: str) -> tuple[bool, str]:
+    label = "PDF" if asset_type == "proposal_pdf" else "Word"
+    try:
+        local_path = _resolve_attachment_for_slack(item, asset_type)
+        if not local_path or not local_path.exists():
+            return False, f"{label} 파일을 준비하지 못했습니다."
+
+        dm_channel = _open_user_dm(client, user_id)
+        if not dm_channel:
+            return False, "Slack DM 채널을 열지 못했습니다."
+
+        title = f"{item.get('company_name') or item.get('title') or item.get('id')} {label}"
+        client.files_upload_v2(
+            channel=dm_channel,
+            file=str(local_path),
+            filename=local_path.name,
+            title=title,
+            initial_comment=f"{title} 파일입니다.",
+        )
+        return True, f"{label} 파일을 Slack DM으로 보냈습니다."
+    except Exception as exc:
+        return False, f"{label} 파일 전송에 실패했습니다: {exc}"
+
+
+def _build_preview_modal(item: dict[str, Any]) -> dict[str, Any]:
+    asset_rows = load_approval_assets(item)
+    proposal_preview = asset_preview_text(asset_rows, "proposal", limit=1400)
+    email_preview = _build_email_preview(asset_rows)
+    metadata = parse_json_value(item.get("metadata_json"), {})
+    auto_delivery = parse_json_value(metadata.get("auto_delivery"), {})
+    blocked_reasons = auto_delivery.get("blocked_reasons") or []
+
+    summary_text = f"*회사:* {item.get('company_name') or item.get('title') or item['id']}"
+    if blocked_reasons:
+        summary_text += "\n*자동발송 차단:* " + " | ".join(str(reason) for reason in blocked_reasons[:3])
+
+    blocks: list[dict[str, Any]] = [
+        {"type": "section", "text": {"type": "mrkdwn", "text": summary_text}},
+        {"type": "divider"},
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f"*메일 제목*\n```{_truncate_for_slack(email_preview['subject'], limit=280)}```"},
+        },
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f"*메일 본문*\n```{_truncate_for_slack(email_preview['body'])}```"},
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "*첨부 파일*\n"
+                + ("\n".join(f"• {name}" for name in email_preview["attachment_names"]) if email_preview["attachment_names"] else "첨부 없음"),
+            },
+        },
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f"*제안서 미리보기*\n```{_truncate_for_slack(proposal_preview)}```"},
+        },
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "승인", "emoji": True},
+                    "style": "primary",
+                    "action_id": "approval_approve",
+                    "value": item["id"],
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "보완 요청", "emoji": True},
+                    "style": "danger",
+                    "action_id": "approval_request_changes",
+                    "value": item["id"],
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "테스트 메일", "emoji": True},
+                    "action_id": "approval_send_test",
+                    "value": item["id"],
+                },
+            ],
+        },
+    ]
+
+    attachment_actions: list[dict[str, Any]] = []
+    if any(path.suffix.lower() == ".pdf" for path in email_preview["attachments"]):
+        attachment_actions.append(
+            {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "PDF 받기", "emoji": True},
+                "action_id": "approval_send_pdf",
+                "value": item["id"],
+            }
+        )
+    if any(path.suffix.lower() in {".docx", ".doc"} for path in email_preview["attachments"]):
+        attachment_actions.append(
+            {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "Word 받기", "emoji": True},
+                "action_id": "approval_send_docx",
+                "value": item["id"],
+            }
+        )
+    attachment_actions.append(
+        {
+            "type": "button",
+            "text": {"type": "plain_text", "text": "콘솔 열기", "emoji": True},
+            "url": slack_public_app_url(),
+        }
+    )
+    blocks.append({"type": "actions", "elements": attachment_actions[:5]})
+
+    return {
+        "type": "modal",
+        "callback_id": "approval_preview_modal",
+        "title": {"type": "plain_text", "text": "산출물 미리보기"},
+        "close": {"type": "plain_text", "text": "닫기"},
+        "blocks": blocks,
     }
 
 
@@ -293,6 +489,12 @@ def ensure_slack_socket_mode_started() -> bool:
                 )
                 return
             approve_approval_item(item, reviewer_identity=body.get("user", {}).get("username") or body.get("user", {}).get("id", ""))
+            _notify_action_result(
+                client,
+                body,
+                text=f"{item.get('company_name') or item.get('title')} 승인 처리했습니다.",
+                title="승인 완료",
+            )
             _post_ephemeral(
                 client,
                 channel_id=body.get("channel", {}).get("id"),
@@ -328,6 +530,58 @@ def ensure_slack_socket_mode_started() -> bool:
                 text=f"{recipient} 로 테스트 메일을 보냈습니다.",
             )
 
+        @app.action("approval_send_pdf")
+        def _approval_send_pdf(ack: Any, body: dict[str, Any], client: Any) -> None:
+            ack()
+            item_id = body["actions"][0]["value"]
+            item = get_approval_item(item_id)
+            if not item:
+                _post_ephemeral(
+                    client,
+                    channel_id=body.get("channel", {}).get("id"),
+                    user_id=body.get("user", {}).get("id"),
+                    text="PDF를 보낼 승인 항목을 찾지 못했습니다.",
+                )
+                return
+            _ok, message = _send_attachment_to_user_dm(
+                client,
+                user_id=body.get("user", {}).get("id", ""),
+                item=item,
+                asset_type="proposal_pdf",
+            )
+            _post_ephemeral(
+                client,
+                channel_id=body.get("channel", {}).get("id"),
+                user_id=body.get("user", {}).get("id"),
+                text=message,
+            )
+
+        @app.action("approval_send_docx")
+        def _approval_send_docx(ack: Any, body: dict[str, Any], client: Any) -> None:
+            ack()
+            item_id = body["actions"][0]["value"]
+            item = get_approval_item(item_id)
+            if not item:
+                _post_ephemeral(
+                    client,
+                    channel_id=body.get("channel", {}).get("id"),
+                    user_id=body.get("user", {}).get("id"),
+                    text="Word 파일을 보낼 승인 항목을 찾지 못했습니다.",
+                )
+                return
+            _ok, message = _send_attachment_to_user_dm(
+                client,
+                user_id=body.get("user", {}).get("id", ""),
+                item=item,
+                asset_type="proposal_docx",
+            )
+            _post_ephemeral(
+                client,
+                channel_id=body.get("channel", {}).get("id"),
+                user_id=body.get("user", {}).get("id"),
+                text=message,
+            )
+
         @app.action("approval_request_changes")
         def _approval_request_changes(ack: Any, body: dict[str, Any], client: Any) -> None:
             ack()
@@ -349,7 +603,8 @@ def ensure_slack_socket_mode_started() -> bool:
                     "user_id": body.get("user", {}).get("id"),
                 }
             )
-            client.views_open(
+            open_modal = client.views_push if body.get("view", {}).get("id") else client.views_open
+            open_modal(
                 trigger_id=body["trigger_id"],
                 view={
                     "type": "modal",

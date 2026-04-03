@@ -292,5 +292,31 @@ class DashboardPipelineTests(unittest.TestCase):
         self.assertEqual(rows[1]["blocked"], 1)
 
 
+class DashboardIssueActionTests(unittest.TestCase):
+    def test_llm_issue_includes_retry_kind(self) -> None:
+        issue = web_dashboard.summarize_run_issue(
+            {
+                "status": "failed",
+                "error_message": "503 Service Unavailable: model is overloaded",
+                "approval_count": 0,
+            }
+        )
+
+        self.assertIsNotNone(issue)
+        self.assertEqual(issue["kind"], "llm_retry_exhausted")
+
+    def test_stale_issue_includes_retry_kind(self) -> None:
+        issue = web_dashboard.summarize_run_issue(
+            {
+                "status": "failed",
+                "error_message": "Run became stale and was marked failed automatically.",
+                "approval_count": 0,
+            }
+        )
+
+        self.assertIsNotNone(issue)
+        self.assertEqual(issue["kind"], "stale_run")
+
+
 if __name__ == "__main__":
     unittest.main()

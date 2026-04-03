@@ -10,6 +10,7 @@ SRC_DIR = ROOT_DIR / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
+import sales_factory.slack_review as slack_review
 from sales_factory.slack_review import build_review_ready_slack_blocks, prime_slack_review_handlers
 
 
@@ -60,6 +61,55 @@ class SlackReviewTests(unittest.TestCase):
         self.assertIn("approval_approve", action_ids)
         self.assertIn("approval_request_changes", action_ids)
         self.assertIn("approval_send_test", action_ids)
+
+    @patch("sales_factory.slack_review.build_primary_email_payload")
+    @patch("sales_factory.slack_review.load_approval_assets")
+    @patch("sales_factory.slack_review.asset_preview_text")
+    def test_preview_modal_contains_email_and_attachment_actions(
+        self,
+        mock_asset_preview_text,
+        mock_load_approval_assets,
+        mock_build_primary_email_payload,
+    ) -> None:
+        mock_load_approval_assets.return_value = [
+            {"asset_type": "proposal", "path": "proposal.md", "metadata_json": {}},
+            {"asset_type": "email_sequence", "path": "email.md", "metadata_json": {}},
+        ]
+        mock_asset_preview_text.return_value = "Proposal preview"
+        mock_build_primary_email_payload.return_value = (
+            "Outbound subject",
+            "Outbound body",
+            [Path("proposal.pdf"), Path("proposal.docx")],
+        )
+
+        modal = slack_review._build_preview_modal(
+            {
+                "id": "item-1",
+                "company_name": "Acme",
+                "title": "Acme outbound package",
+                "metadata_json": {"auto_delivery": {"blocked_reasons": []}},
+            }
+        )
+
+        self.assertEqual(modal["type"], "modal")
+        block_text = "\n".join(
+            block.get("text", {}).get("text", "")
+            for block in modal["blocks"]
+            if isinstance(block.get("text"), dict)
+        )
+        self.assertIn("Outbound subject", block_text)
+        self.assertIn("Outbound body", block_text)
+        self.assertIn("proposal.pdf", block_text)
+
+        action_ids = []
+        for block in modal["blocks"]:
+            if block.get("type") == "actions":
+                action_ids.extend(element.get("action_id") for element in block.get("elements", []) if element.get("action_id"))
+        self.assertIn("approval_approve", action_ids)
+        self.assertIn("approval_request_changes", action_ids)
+        self.assertIn("approval_send_test", action_ids)
+        self.assertIn("approval_send_pdf", action_ids)
+        self.assertIn("approval_send_docx", action_ids)
 
 
 if __name__ == "__main__":
