@@ -16,6 +16,10 @@ EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 HANGUL_RE = re.compile(r"[\uac00-\ud7af]")
 HIRAGANA_KATAKANA_RE = re.compile(r"[\u3040-\u30ff]")
 NON_WORD_TEXT_RE = re.compile(r"[^0-9A-Za-z\u3040-\u30ff\uac00-\ud7af]+")
+KOREAN_COMPANY_NAME = "주식회사 98점7도"
+KOREAN_SENDER_NAME = "염정원"
+KOREAN_FIXED_INTRO = f"안녕하세요, {KOREAN_COMPANY_NAME} {KOREAN_SENDER_NAME}입니다."
+KOREAN_SUBJECT_PREFIX = f"[{KOREAN_COMPANY_NAME}]"
 TITLE_ONLY_IDENTITIES = {
     "대표",
     "대표이사",
@@ -342,6 +346,9 @@ def detect_email_language(text: str) -> str:
 
 
 def resolve_sender_identity(language: str) -> str:
+    if language == "ko":
+        return KOREAN_SENDER_NAME
+
     sender_name = resolve_sender_name().strip()
     if sender_name and sender_name.lower() != "onecation":
         return sender_name
@@ -422,7 +429,69 @@ def is_title_only_identity(sender_identity: str) -> bool:
     return normalized in TITLE_ONLY_IDENTITIES
 
 
+def normalize_subject_whitespace(subject: str) -> str:
+    return " ".join((subject or "").split()).strip()
+
+
+def normalize_outbound_subject(subject: str, language: str) -> str:
+    normalized = normalize_subject_whitespace(subject)
+    if language != "ko":
+        return normalized
+
+    core = normalized
+    if core.startswith(KOREAN_SUBJECT_PREFIX):
+        core = core[len(KOREAN_SUBJECT_PREFIX) :].strip()
+    if core.endswith("의 건"):
+        core = core[: -len("의 건")].strip()
+    core = core.strip(" -:|")
+    return f"{KOREAN_SUBJECT_PREFIX} {core or '제안'}의 건"
+
+
+def is_korean_intro_line(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped:
+        return False
+    lowered = stripped.lower()
+    if stripped == KOREAN_FIXED_INTRO:
+        return True
+    if stripped.startswith("안녕하세요") or stripped.startswith("안녕하십니까"):
+        return True
+    return (
+        ("onecation" in lowered or "원케이션" in stripped or KOREAN_COMPANY_NAME in stripped)
+        and ("입니다" in stripped or "드립니다" in stripped or "대표" in stripped)
+    )
+
+
+def enforce_fixed_intro(body: str, language: str) -> str:
+    normalized = (body or "").strip()
+    if language != "ko":
+        return normalized
+
+    lines = normalized.splitlines()
+    while lines and not lines[0].strip():
+        lines.pop(0)
+
+    consumed = 0
+    for idx, line in enumerate(lines[:3]):
+        stripped = line.strip()
+        if not stripped:
+            consumed = idx + 1
+            continue
+        if is_korean_intro_line(stripped):
+            consumed = idx + 1
+            continue
+        break
+
+    remainder = "\n".join(lines[consumed:]).strip() if consumed else normalized
+    if not remainder:
+        return KOREAN_FIXED_INTRO
+    return f"{KOREAN_FIXED_INTRO}\n\n{remainder}"
+
+
 def format_intro(language: str, sender_identity: str) -> str:
+    if language == "ko":
+        return KOREAN_FIXED_INTRO
+
     if "onecation" in sender_identity.lower():
         return {
             "ko": f"안녕하십니까, {sender_identity}입니다.",
@@ -444,7 +513,13 @@ def format_intro(language: str, sender_identity: str) -> str:
     }[language]
 
 
-def format_signature_block(sender_identity: str, sender_email: str) -> str:
+def format_signature_block(language: str, sender_identity: str, sender_email: str) -> str:
+    if language == "ko":
+        lines = [f"{KOREAN_SENDER_NAME} | {KOREAN_COMPANY_NAME}"]
+        if sender_email:
+            lines.append(sender_email)
+        return "\n".join(lines)
+
     if not sender_identity or sender_identity.lower() == "onecation":
         first_line = "Onecation"
     elif "onecation" in sender_identity.lower():
@@ -464,6 +539,7 @@ def compose_primary_email_body(body: str, *, cta: str, offer_summary: str) -> st
     language = detect_email_language(body)
     sender_identity = resolve_sender_identity(language)
     sender_email = os.environ.get("SMTP_USER", "").strip()
+    normalized_body = enforce_fixed_intro(body, language)
 
     closing_map = {
         "ko": "검토해 주셔서 감사합니다. 편하신 시간에 회신 주시면 제안 내용을 더 구체적으로 설명드리겠습니다.",
@@ -472,22 +548,22 @@ def compose_primary_email_body(body: str, *, cta: str, offer_summary: str) -> st
     }
 
     chunks: list[str] = []
-    if "onecation" not in body.lower():
+    if language != "ko" and "onecation" not in normalized_body.lower():
         chunks.append(format_intro(language, sender_identity))
 
-    chunks.append(body.strip())
+    chunks.append(normalized_body)
 
     concise_offer_summary = summarize_offer_summary(offer_summary)
-    if concise_offer_summary and not body_already_mentions_offer(body, concise_offer_summary):
+    if concise_offer_summary and not body_already_mentions_offer(normalized_body, concise_offer_summary):
         chunks.append(concise_offer_summary)
 
-    if not body_already_has_closing(body, language):
+    if not body_already_has_closing(normalized_body, language):
         chunks.append(closing_map[language])
 
     if cta:
         chunks.append(cta)
 
-    chunks.append(format_signature_block(sender_identity, sender_email))
+    chunks.append(format_signature_block(language, sender_identity, sender_email))
 
     return "\n\n".join(part for part in chunks if part and part.strip())
 
@@ -517,6 +593,8 @@ def build_primary_email_payload(asset_rows: list[dict[str, Any]]) -> tuple[str, 
 
     email_metadata = parse_json_value(email_asset.get("metadata_json"), {})
     subject, body, _preview_line, cta = parse_primary_email_asset(Path(email_asset["path"]), email_metadata)
+    language = detect_email_language(body)
+    subject = normalize_outbound_subject(subject, language)
     body = compose_primary_email_body(
         body,
         cta=cta,

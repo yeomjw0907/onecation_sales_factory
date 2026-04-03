@@ -113,6 +113,115 @@ class DashboardPipelineTests(unittest.TestCase):
 
         self.assertEqual(resolved, log_path)
 
+    def test_summarize_run_issue_maps_transient_llm_failure(self) -> None:
+        issue = web_dashboard.summarize_run_issue(
+            {
+                "status": "failed",
+                "error_message": "503 Service Unavailable: model is overloaded",
+                "approval_count": 0,
+            }
+        )
+
+        self.assertIsNotNone(issue)
+        self.assertEqual(issue["title"], "LLM 재시도 초과")
+        self.assertIn("다시 시도", issue["action"])
+
+    def test_summarize_auto_delivery_uses_human_labels(self) -> None:
+        summary = web_dashboard.summarize_auto_delivery(
+            {
+                "auto_delivery": {
+                    "mode": "manual",
+                    "eligible": False,
+                    "blocked_reasons": ["missing pdf"],
+                }
+            }
+        )
+
+        self.assertEqual(summary, "수동 검토 차단: missing pdf")
+
+    def test_format_reroute_targets_uses_human_labels(self) -> None:
+        formatted = web_dashboard.format_reroute_targets(["proposal_localization_task", "email_localization_task"])
+
+        self.assertEqual(formatted, "제안서 현지화, 메일 현지화")
+
+
+    @patch("web_dashboard.build_primary_email_payload")
+    def test_build_review_email_preview_prefers_primary_payload(self, mock_build_primary_email_payload) -> None:
+        mock_build_primary_email_payload.return_value = (
+            "Preview subject",
+            "Preview body",
+            [Path("proposal.pdf")],
+        )
+
+        preview = web_dashboard.build_review_email_preview(
+            [{"asset_type": "email_sequence", "path": "outreach_emails.md", "metadata_json": {}}]
+        )
+
+        self.assertIsNotNone(preview)
+        assert preview is not None
+        self.assertEqual(preview["subject"], "Preview subject")
+        self.assertEqual(preview["body"], "Preview body")
+        self.assertEqual(preview["attachment_names"], ["proposal.pdf"])
+
+    def test_build_review_email_preview_falls_back_to_raw_email_asset(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            email_path = Path(temp_dir) / "outreach_emails.md"
+            email_path.write_text(
+                "## Primary Outbound Email\n"
+                "- subject: Hello there\n"
+                "- body:\n"
+                "    First line\n"
+                "    Second line\n",
+                encoding="utf-8",
+            )
+
+            preview = web_dashboard.build_review_email_preview(
+                [{"asset_type": "email_sequence", "path": str(email_path), "metadata_json": {}}]
+            )
+
+        self.assertIsNotNone(preview)
+        assert preview is not None
+        self.assertEqual(preview["subject"], "Hello there")
+        self.assertIn("First line", preview["body"])
+        self.assertEqual(preview["attachment_names"], [])
+
+    @patch("web_dashboard.read_asset_bytes", return_value=b"%PDF-1.7")
+    def test_build_downloadable_asset_payload_returns_file_metadata(self, mock_read_asset_bytes) -> None:
+        payload = web_dashboard.build_downloadable_asset_payload(
+            {"asset_type": "proposal_pdf", "path": "proposal.pdf", "metadata_json": {}}
+        )
+
+        self.assertIsNotNone(payload)
+        assert payload is not None
+        self.assertEqual(payload["file_name"], "proposal.pdf")
+        self.assertEqual(payload["mime"], "application/pdf")
+        self.assertEqual(payload["data"], b"%PDF-1.7")
+        mock_read_asset_bytes.assert_called_once()
+
+    def test_get_auto_refresh_interval_seconds_only_refreshes_running_runs(self) -> None:
+        self.assertEqual(
+            web_dashboard.get_auto_refresh_interval_seconds(
+                running_run={"id": "run-1"},
+                latest_run={"status": "running"},
+                enabled=True,
+            ),
+            4,
+        )
+        self.assertIsNone(
+            web_dashboard.get_auto_refresh_interval_seconds(
+                running_run=None,
+                latest_run={"status": "waiting_approval"},
+                enabled=True,
+            )
+        )
+        self.assertIsNone(
+            web_dashboard.get_auto_refresh_interval_seconds(
+                running_run={"id": "run-1"},
+                latest_run={"status": "running"},
+                enabled=False,
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

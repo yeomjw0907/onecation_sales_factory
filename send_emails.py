@@ -73,6 +73,12 @@ BRAND = {
     "color":   "#0D1B2A",
 }
 
+KOREAN_COMPANY_NAME = "주식회사 98점7도"
+KOREAN_SENDER_NAME = "염정원"
+KOREAN_FIXED_INTRO = f"안녕하세요, {KOREAN_COMPANY_NAME} {KOREAN_SENDER_NAME}입니다."
+KOREAN_SUBJECT_PREFIX = f"[{KOREAN_COMPANY_NAME}]"
+HANGUL_RE = re.compile(r"[\uac00-\ud7af]")
+
 TOUCH_DAYS = {"D1": 1, "D3": 3, "D6": 6, "D10": 10}
 
 
@@ -268,8 +274,67 @@ def _body_with_name(body: str, recipient_name: str) -> str:
     return (body or "").replace("[Contact Name]", name).replace("{{name}}", name)
 
 
+def _detect_email_language(text: str) -> str:
+    return "ko" if HANGUL_RE.search(text or "") else "other"
+
+
+def _normalize_subject(subject: str, body_text: str) -> str:
+    normalized = " ".join((subject or "").split()).strip()
+    if _detect_email_language(f"{subject}\n{body_text}") != "ko":
+        return normalized
+
+    core = normalized
+    if core.startswith(KOREAN_SUBJECT_PREFIX):
+        core = core[len(KOREAN_SUBJECT_PREFIX) :].strip()
+    if core.endswith("의 건"):
+        core = core[: -len("의 건")].strip()
+    core = core.strip(" -:|")
+    return f"{KOREAN_SUBJECT_PREFIX} {core or '제안'}의 건"
+
+
+def _is_korean_intro_line(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped:
+        return False
+    lowered = stripped.lower()
+    if stripped == KOREAN_FIXED_INTRO:
+        return True
+    if stripped.startswith("안녕하세요") or stripped.startswith("안녕하십니까"):
+        return True
+    return (
+        ("onecation" in lowered or "원케이션" in stripped or KOREAN_COMPANY_NAME in stripped)
+        and ("입니다" in stripped or "드립니다" in stripped or "대표" in stripped)
+    )
+
+
+def _normalize_body_intro(body: str) -> str:
+    normalized = (body or "").strip()
+    if _detect_email_language(normalized) != "ko":
+        return normalized
+
+    lines = normalized.splitlines()
+    while lines and not lines[0].strip():
+        lines.pop(0)
+
+    consumed = 0
+    for idx, line in enumerate(lines[:3]):
+        stripped = line.strip()
+        if not stripped:
+            consumed = idx + 1
+            continue
+        if _is_korean_intro_line(stripped):
+            consumed = idx + 1
+            continue
+        break
+
+    remainder = "\n".join(lines[consumed:]).strip() if consumed else normalized
+    if not remainder:
+        return KOREAN_FIXED_INTRO
+    return f"{KOREAN_FIXED_INTRO}\n\n{remainder}"
+
+
 def render_html(touch: Touchpoint, company_name: str, has_pdf: bool, recipient_name: str = "") -> str:
-    body_text = _body_with_name(touch.body or "", recipient_name)
+    body_text = _normalize_body_intro(_body_with_name(touch.body or "", recipient_name))
     body_html = _md_to_html(body_text) if body_text else ""
     cta_text  = touch.cta or f"연락 주시면 바로 안내드리겠습니다 — {BRAND['phone']} / {BRAND['email']}"
     pdf_note  = (
@@ -360,7 +425,7 @@ def render_html(touch: Touchpoint, company_name: str, has_pdf: bool, recipient_n
 
 def render_plain(touch: Touchpoint, company_name: str, recipient_name: str = "") -> str:
     """HTML 미지원 클라이언트용 plain text. [Contact Name]은 recipient_name으로 치환."""
-    body = _body_with_name(touch.body or "", recipient_name)
+    body = _normalize_body_intro(_body_with_name(touch.body or "", recipient_name))
     cta = touch.cta or BRAND["phone"]
     lines = [body, "", f"→ {cta}", "", "---", BRAND["name"], BRAND["phone"], BRAND["email"]]
     return "\n".join(lines)
@@ -435,7 +500,11 @@ def send_one(
 ) -> bool:
     """이메일 1건 발송. recipient_name은 본문 [Contact Name]/{{name}} 치환용."""
     from_addr = os.environ.get("SMTP_USER", BRAND["email"])
-    subject   = touch.subject or f"[{company_name}] 맞춤 마케팅 제안 — {touch.tag}"
+    subject_body = _body_with_name(touch.body or "", recipient_name)
+    subject = _normalize_subject(
+        touch.subject or f"[{company_name}] 맞춤 마케팅 제안 — {touch.tag}",
+        subject_body,
+    )
 
     msg = MIMEMultipart("alternative")
     msg["From"]    = f"{BRAND['name']} <{from_addr}>"
@@ -485,7 +554,8 @@ def print_preview(
     print(f"  회사: {company}")
     print(f"  수신: {to_email}  ({contact.name if contact else '-'})")
     print(f"  터치: {touch.tag}  {status}")
-    print(f"  제목: {touch.subject or '(제목 없음)'}")
+    preview_subject = _normalize_subject(touch.subject or "(제목 없음)", touch.body or "")
+    print(f"  제목: {preview_subject}")
     print(f"  본문: {(touch.body or '')[:120].replace(chr(10),' ')}...")
     print(f"  PDF:  {pdf_path.name if pdf_path else '(없음)'}")
     print(f"  CTA:  {touch.cta or '-'}")

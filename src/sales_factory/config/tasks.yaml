@@ -496,6 +496,8 @@ email_outreach_task:
     - Mention one company-specific observation.
     - Mention one market or competitor insight.
     - State one concrete way Onecation would help.
+    - Keep the subject core concise and specific so Korean localization can turn it into
+      `[주식회사 98점7도] ...의 건` without awkward wording.
     - In the primary email body, state the exact commercial offer in one plain sentence.
       Name whether this is a website relaunch, website maintenance recovery,
       new website build, or website-plus-marketing execution support.
@@ -507,8 +509,11 @@ email_outreach_task:
       - Never leave bracket placeholders such as [your name], [contact name], or [city].
       - Always use plain ASCII punctuation instead of smart quotes or typographic
         apostrophes.
-      - Use the exact sender name `{sender_name}` in the opening introduction.
-        For Korean, prefer "Onecation의 {sender_name}입니다." or an equally natural variant.
+      - For Korean localization, the opening sentence must be the exact fixed line
+        `안녕하세요, 주식회사 98점7도 염정원입니다.`
+      - For Korean localization, rewrite every subject into the exact format
+        `[주식회사 98점7도] ...의 건`.
+      - For non-Korean markets, identify the sender as the 98.7 Co., Ltd. team naturally.
       - Lead with the company's own strengths, position, or current situation before
         naming competitors.
       - Use competitor references only as brief supporting context, not as the first
@@ -520,7 +525,8 @@ email_outreach_task:
     The first email should make it clear that real work was already done:
     review, diagnosis, competitor context, and tailored execution ideas.
     The primary email body must also include:
-    - a short opening sentence that identifies Onecation and uses the exact sender name `{sender_name}`
+    - a short opening sentence that can localize cleanly into the fixed Korean greeting
+      `안녕하세요, 주식회사 98점7도 염정원입니다.`
     - a short, explicit offer sentence that says what we want to sell
     - a short, polite closing sentence before the CTA field
     If website access was uncertain, describe it as an audit verification issue,
@@ -586,6 +592,10 @@ email_localization_task:
     - Preserve the exact field keys `subject`, `preview_line`, `body`, and `cta`
       in English.
       - Translate only the customer-facing values into {proposal_language}.
+      - If {proposal_language} is Korean, every subject must use the exact format
+        `[주식회사 98점7도] ...의 건`.
+      - If {proposal_language} is Korean, every email body must start with the exact line
+        `안녕하세요, 주식회사 98점7도 염정원입니다.`
       - Keep company-specific facts, CTA intent, and offer direction aligned with
         the canonical English draft and the localized proposal.
       - Keep the Onecation introduction, explicit offer sentence, and polite

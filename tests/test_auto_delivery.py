@@ -444,6 +444,53 @@ class AutoDeliveryTests(unittest.TestCase):
             self.assertIn("website maintenance recovery package", body)
             self.assertEqual(attachments, [docx_path])
 
+    def test_build_primary_email_payload_enforces_fixed_korean_intro_and_subject(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            email_path = temp_path / "outreach_emails.md"
+            email_path.write_text(
+                "# 서울대학교\n"
+                "## Primary Outbound Email\n"
+                "- subject: 서울대학교 글로벌 디지털 브랜드 위상 강화 제안\n"
+                "- preview_line: Preview\n"
+                "- body:\n"
+                "    안녕하십니까, Onecation의 대표입니다.\n"
+                "    \n"
+                "    서울대학교의 연구 성과와 국제 협력 내러티브를 더 선명하게 보여줄 기회가 있습니다.\n"
+                "- cta: 다음 주 30분 정도 논의 가능하실까요?\n",
+                encoding="utf-8",
+            )
+            proposal_path = temp_path / "proposal.md"
+            proposal_path.write_text(
+                "# 서울대학교\n"
+                "## Recommended Direction\n"
+                "글로벌 브랜드 콘텐츠 증폭 프로그램을 제안합니다.\n",
+                encoding="utf-8",
+            )
+            pdf_path = temp_path / "proposal.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4")
+
+            with patch.dict(
+                "os.environ",
+                {
+                    "SMTP_USER": "ops@onecation.co.kr",
+                    "SALES_FACTORY_SENDER_NAME": "대표",
+                },
+                clear=False,
+            ):
+                subject, body, _attachments = build_primary_email_payload(
+                    [
+                        {"asset_type": "email_sequence", "path": str(email_path), "metadata_json": {}},
+                        {"asset_type": "proposal", "path": str(proposal_path), "metadata_json": {}},
+                        {"asset_type": "proposal_pdf", "path": str(pdf_path), "metadata_json": {}},
+                    ]
+                )
+
+            self.assertEqual(subject, "[주식회사 98점7도] 서울대학교 글로벌 디지털 브랜드 위상 강화 제안의 건")
+            self.assertTrue(body.startswith("안녕하세요, 주식회사 98점7도 염정원입니다."))
+            self.assertEqual(body.count("안녕하세요, 주식회사 98점7도 염정원입니다."), 1)
+            self.assertIn("염정원 | 주식회사 98점7도", body)
+
 
 if __name__ == "__main__":
     unittest.main()

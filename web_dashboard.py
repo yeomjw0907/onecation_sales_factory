@@ -188,6 +188,12 @@ VALIDATION_ISSUE_LABELS = {
     "missing_proposal": "제안서 없음",
     "score_below_threshold": "품질 기준 미달",
 }
+AUTO_SEND_MODE_LABELS = {
+    "manual": "수동 검토",
+    "shadow": "그림자 모니터링",
+    "canary": "카나리 테스트",
+    "live": "자동 발송",
+}
 
 STRATEGY_BIAS_LABELS = {
     "general_digital_recovery": "기본 디지털 회복형",
@@ -440,16 +446,272 @@ def summarize_auto_delivery(metadata: dict[str, Any] | None) -> str:
     eligible = bool(payload.get("eligible"))
     mode = payload.get("mode") or "manual"
     reasons = payload.get("blocked_reasons") or []
+    mode_label = display_delivery_mode(str(mode))
     if eligible:
-        return f"{mode} eligible"
+        return f"{mode_label} 가능"
     if reasons:
-        return f"{mode} blocked: {reasons[0]}"
-    return f"{mode} blocked"
+        return f"{mode_label} 차단: {reasons[0]}"
+    return f"{mode_label} 차단"
 
 
 def summarize_run_auto_delivery(run_row: dict[str, Any] | None) -> dict[str, Any]:
     metadata = parse_json_field(run_row.get("metadata_json") if run_row else None, {})
     return parse_json_field(metadata.get("auto_delivery_summary"), {})
+
+
+def display_delivery_mode(value: str | None) -> str:
+    return AUTO_SEND_MODE_LABELS.get(str(value or "manual"), "수동 검토")
+
+
+def display_storage_status(backend_info: dict[str, Any] | None) -> str:
+    backend = str((backend_info or {}).get("backend") or "")
+    if backend == "supabase":
+        return "원격 저장 정상"
+    return "로컬 저장 중"
+
+
+def get_run_metadata(run_row: dict[str, Any] | None) -> dict[str, Any]:
+    return parse_json_field(run_row.get("metadata_json") if run_row else None, {})
+
+
+def get_run_inputs(run_row: dict[str, Any] | None) -> dict[str, Any]:
+    return parse_json_field(run_row.get("inputs_json") if run_row else None, {})
+
+
+def get_run_segment_label(run_row: dict[str, Any] | None) -> str:
+    inputs = get_run_inputs(run_row)
+    metadata = get_run_metadata(run_row)
+    if inputs.get("segment_label"):
+        return str(inputs["segment_label"])
+    if metadata.get("segment_label"):
+        return str(metadata["segment_label"])
+    if metadata.get("auto_mode"):
+        return "자동 패턴 추천"
+    return "수동/일반 실행"
+
+
+def infer_run_focus_task_name(run_row: dict[str, Any] | None, tasks: list[dict[str, Any]] | None = None) -> str | None:
+    current_task = str((run_row or {}).get("current_task") or "").strip()
+    if current_task:
+        return current_task
+
+    ordered_tasks = sorted(tasks or [], key=lambda row: int(row.get("task_order") or 0))
+    for status in ("running", "failed", "waiting_approval", "pending"):
+        matched = next((row for row in ordered_tasks if row.get("status") == status), None)
+        if matched and matched.get("task_name"):
+            return str(matched["task_name"])
+
+    if ordered_tasks and ordered_tasks[-1].get("task_name"):
+        return str(ordered_tasks[-1]["task_name"])
+    return None
+
+
+def summarize_asset_rows(asset_rows: list[dict[str, Any]]) -> dict[str, int]:
+    company_count = len({str(row.get("company_name") or "").strip() for row in asset_rows if row.get("company_name")})
+    proposal_count = sum(1 for row in asset_rows if row.get("asset_type") == "proposal")
+    pdf_count = sum(1 for row in asset_rows if row.get("asset_type") == "proposal_pdf")
+    today_count = len(filter_rows_by_date(asset_rows, "created_at", date.today()))
+    return {
+        "asset_count": len(asset_rows),
+        "company_count": company_count,
+        "proposal_count": proposal_count,
+        "pdf_count": pdf_count,
+        "today_count": today_count,
+    }
+
+
+def get_auto_refresh_interval_seconds(
+    *,
+    running_run: dict[str, Any] | None,
+    latest_run: dict[str, Any] | None,
+    enabled: bool,
+) -> int | None:
+    if not enabled:
+        return None
+    if running_run:
+        return 4
+    if latest_run and str(latest_run.get("status") or "") == "waiting_approval":
+        return None
+    return None
+
+
+def format_reroute_targets(value: Any) -> str:
+    targets = parse_json_field(value, [])
+    if not targets:
+        return "-"
+    if not isinstance(targets, list):
+        targets = [targets]
+    labels = [display_task_name(str(item)) for item in targets if str(item).strip()]
+    return ", ".join(labels) if labels else "-"
+
+
+def is_urgent_approval_item(item: dict[str, Any]) -> bool:
+    metadata = parse_json_field(item.get("metadata_json"), {})
+    auto_delivery = parse_json_field(metadata.get("auto_delivery"), {})
+    validation_issues = metadata.get("validation_issues") or []
+    blocked_reasons = auto_delivery.get("blocked_reasons") or []
+    return int(item.get("priority", 0) or 0) >= 2 or bool(validation_issues) or bool(blocked_reasons)
+
+
+def summarize_run_issue(run_row: dict[str, Any] | None, tasks: list[dict[str, Any]] | None = None) -> dict[str, str] | None:
+    if not run_row:
+        return None
+
+    status = str(run_row.get("status") or "")
+    error_message = str(run_row.get("error_message") or "").strip()
+    lowered_error = error_message.lower()
+    focus_task_name = infer_run_focus_task_name(run_row, tasks)
+    waiting_count = int(run_row.get("approval_count", 0) or 0)
+    waiting_items_count = waiting_count
+
+    if status in {"waiting_approval", "rejected"} and not waiting_items_count and run_row.get("id"):
+        waiting_items_count = len([item for item in list_approval_items("waiting_approval") if item.get("run_id") == run_row.get("id")])
+
+    if status == "waiting_approval":
+        if waiting_items_count <= 0:
+            return {
+                "severity": "warning",
+                "title": "검토 대기 누락",
+                "summary": "상태는 검토 대기인데 실제 승인 항목이 연결되지 않았습니다.",
+                "action": "실행 로그를 확인하고 산출물/검토 큐를 다시 맞춘 뒤 재실행하세요.",
+                "raw_error": error_message,
+            }
+        return {
+            "severity": "warning",
+            "title": "사람 검토 대기",
+            "summary": f"지금 사람이 판단해야 할 항목이 {waiting_items_count}건 남아 있습니다.",
+            "action": "검토 대기 탭에서 승인하거나 보완 요청을 처리하세요.",
+            "raw_error": error_message,
+        }
+
+    if status != "failed":
+        return None
+
+    if any(keyword in lowered_error for keyword in ("503", "overloaded", "temporarily overloaded", "retrying transient llm failure")):
+        return {
+            "severity": "error",
+            "title": "LLM 재시도 초과",
+            "summary": "모델 과부하 또는 일시 오류가 계속되어 자동 재시도 후에도 완료하지 못했습니다.",
+            "action": "잠시 후 다시 실행하거나 대상 수를 줄여서 다시 시도하세요.",
+            "raw_error": error_message,
+        }
+    if "slack" in lowered_error and any(keyword in lowered_error for keyword in ("socket", "connection", "timeout", "handshake")):
+        return {
+            "severity": "error",
+            "title": "Slack 연결 지연",
+            "summary": "Slack 버튼 또는 알림 연결이 제때 붙지 않아 흐름이 멈췄습니다.",
+            "action": "Slack 연결 상태를 확인한 뒤 다시 실행하세요.",
+            "raw_error": error_message,
+        }
+    if any(
+        keyword in lowered_error
+        for keyword in (
+            "lead verification rejected every company",
+            "manual review is required before proposal generation",
+            "rejected every company",
+            "no verified company",
+        )
+    ):
+        return {
+            "severity": "error",
+            "title": "리드 없음",
+            "summary": "검증을 통과한 회사가 없어 제안서 단계로 넘어가지 못했습니다.",
+            "action": "탐색 조건을 넓히거나 세그먼트/국가를 바꿔 다시 실행하세요.",
+            "raw_error": error_message,
+        }
+    if "approval" in lowered_error and any(keyword in lowered_error for keyword in ("missing", "queue", "review")):
+        return {
+            "severity": "error",
+            "title": "검토 대기 누락",
+            "summary": "승인 단계로 이어지는 검토 항목을 만들지 못해 흐름이 끊겼습니다.",
+            "action": "산출물과 검토 대기 탭을 확인한 뒤 다시 실행하세요.",
+            "raw_error": error_message,
+        }
+    if any(keyword in lowered_error for keyword in ("stale", "heartbeat")):
+        return {
+            "severity": "error",
+            "title": "실행이 오래 멈춤",
+            "summary": "하트비트가 끊겨 시스템이 실행을 자동 실패 처리했습니다.",
+            "action": "네트워크나 배포 상태를 확인한 뒤 다시 실행하세요.",
+            "raw_error": error_message,
+        }
+
+    stage_label = display_task_name(focus_task_name) if focus_task_name else "실행"
+    return {
+        "severity": "error",
+        "title": f"{stage_label} 실패",
+        "summary": f"{stage_label} 단계에서 예외가 발생해 실행이 중단되었습니다.",
+        "action": "실행 로그를 열어 마지막 단계와 오류 메시지를 확인한 뒤 다시 실행하세요.",
+        "raw_error": error_message,
+    }
+
+
+def render_run_issue_banner(issue: dict[str, str]) -> None:
+    palette = {
+        "error": {
+            "bg": "var(--sf-panel)",
+            "border": "#ef4444",
+            "badge_bg": "#fff1f2",
+            "badge_text": "#b91c1c",
+            "shadow": "0 0 0 4px rgba(239,68,68,0.10), 0 18px 38px rgba(239,68,68,0.08)",
+        },
+        "warning": {
+            "bg": "var(--sf-panel)",
+            "border": "#f59e0b",
+            "badge_bg": "#fffbeb",
+            "badge_text": "#b45309",
+            "shadow": "0 0 0 4px rgba(245,158,11,0.10), 0 18px 38px rgba(245,158,11,0.08)",
+        },
+        "info": {
+            "bg": "var(--sf-panel)",
+            "border": "#60a5fa",
+            "badge_bg": "#eff6ff",
+            "badge_text": "#2563eb",
+            "shadow": "0 0 0 4px rgba(96,165,250,0.10), 0 18px 38px rgba(96,165,250,0.08)",
+        },
+        "success": {
+            "bg": "var(--sf-panel)",
+            "border": "#22c55e",
+            "badge_bg": "#f0fdf4",
+            "badge_text": "#15803d",
+            "shadow": "0 0 0 4px rgba(34,197,94,0.10), 0 18px 38px rgba(34,197,94,0.08)",
+        },
+    }.get(
+        issue.get("severity") or "info",
+        {
+            "bg": "var(--sf-panel)",
+            "border": "#60a5fa",
+            "badge_bg": "#eff6ff",
+            "badge_text": "#2563eb",
+            "shadow": "0 0 0 4px rgba(96,165,250,0.10), 0 18px 38px rgba(96,165,250,0.08)",
+        },
+    )
+    badge_label = {
+        "error": "즉시 확인",
+        "warning": "확인 필요",
+        "info": "진행 중",
+        "success": "완료",
+    }.get(issue.get("severity") or "info", "안내")
+
+    st.markdown(
+        f"""
+        <div style="border:1px solid {palette['border']};border-radius:16px;background:{palette['bg']};
+        box-shadow:{palette['shadow']};padding:16px 18px;margin:6px 0 14px 0;color:var(--sf-text);">
+            <div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start;">
+                <div style="font-size:18px;font-weight:800;line-height:1.25;">{html.escape(issue.get('title') or '상태 요약')}</div>
+                <span style="display:inline-flex;align-items:center;padding:4px 10px;border-radius:999px;
+                background:{palette['badge_bg']};color:{palette['badge_text']};font-size:12px;font-weight:800;">
+                    {html.escape(badge_label)}
+                </span>
+            </div>
+            <div style="font-size:13px;color:var(--sf-muted);line-height:1.6;margin-top:8px;">{html.escape(issue.get('summary') or '-')}</div>
+            <div style="font-size:13px;font-weight:700;color:var(--sf-text);line-height:1.6;margin-top:10px;">
+                지금 할 일: {html.escape(issue.get('action') or '-')}
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def display_task_name(value: str | None) -> str:
@@ -677,7 +939,7 @@ def render_run_log_panel(run_row: dict[str, Any] | None, *, key_prefix: str) -> 
 
     log_stat = selected_log.stat()
     c1, c2, c3 = st.columns([2.8, 1.1, 1.2])
-    c1.caption(f"경로: `{selected_log}`")
+    c1.caption(f"로그 파일: `{selected_log.name}`")
     c2.caption(f"수정: {format_local_datetime(datetime.fromtimestamp(log_stat.st_mtime).isoformat(timespec='seconds'))}")
     c3.caption(f"크기: {log_stat.st_size:,} bytes")
     st.code(content or "(비어있음)", language="text")
@@ -707,30 +969,54 @@ def inject_app_shell_styles() -> None:
     st.markdown(
         """
         <style>
-        @import url("https://cdn.jsdelivr.net/npm/pretendard/dist/web/static/pretendard.css");
+        @import url("https://fonts.bunny.net/css?family=dm-sans:300,400,500,600,700&display=swap");
+        @import url("https://cdn.jsdelivr.net/npm/geist@1.3.0/dist/fonts/geist-mono/style.css");
 
         :root {
-            --sf-bg: #f6f3ee;
-            --sf-panel: rgba(255, 252, 246, 0.94);
-            --sf-panel-strong: #fffdfa;
-            --sf-sidebar: #f1ede6;
-            --sf-border: rgba(15, 23, 42, 0.08);
-            --sf-text: #182132;
-            --sf-muted: #667085;
-            --sf-accent: #dc5b43;
-            --sf-accent-soft: rgba(220, 91, 67, 0.12);
-            --sf-shadow: 0 18px 40px rgba(15, 23, 42, 0.05);
+            color-scheme: light dark;
+            --sf-native-bg:      var(--background-color, #0c0c0c);
+            --sf-native-surface: var(--secondary-background-color, #141414);
+            --sf-native-text:    var(--text-color, #ededed);
+            --sf-native-accent:  var(--primary-color, #3b82f6);
+
+            --sf-bg:           var(--sf-native-bg);
+            --sf-surface:      var(--sf-native-surface);
+            --sf-panel:        color-mix(in srgb, var(--sf-native-surface) 82%, var(--sf-native-bg) 18%);
+            --sf-panel-strong: color-mix(in srgb, var(--sf-native-surface) 70%, var(--sf-native-text) 12%);
+            --sf-border:       color-mix(in srgb, var(--sf-native-text) 10%, transparent);
+            --sf-border-md:    color-mix(in srgb, var(--sf-native-text) 16%, transparent);
+            --sf-border-str:   color-mix(in srgb, var(--sf-native-text) 24%, transparent);
+            --sf-text:         var(--sf-native-text);
+            --sf-muted:        color-mix(in srgb, var(--sf-native-text) 62%, var(--sf-native-bg));
+            --sf-dim:          color-mix(in srgb, var(--sf-native-text) 30%, var(--sf-native-bg));
+            --sf-accent:       var(--sf-native-accent);
+            --sf-accent-soft:  color-mix(in srgb, var(--sf-native-accent) 14%, transparent);
+            --sf-accent-str:   color-mix(in srgb, var(--sf-native-accent) 24%, transparent);
+            --sf-green:        #22c55e;
+            --sf-green-soft:   color-mix(in srgb, #22c55e 12%, transparent);
+            --sf-amber:        #f59e0b;
+            --sf-amber-soft:   color-mix(in srgb, #f59e0b 12%, transparent);
+            --sf-red:          #ef4444;
+            --sf-red-soft:     color-mix(in srgb, #ef4444 12%, transparent);
+            --sf-chip-bg:      color-mix(in srgb, var(--sf-native-text) 7%, transparent);
+            --sf-chip-border:  color-mix(in srgb, var(--sf-native-text) 14%, transparent);
+            --sf-chip-text:    color-mix(in srgb, var(--sf-native-text) 72%, var(--sf-native-bg));
+            --sf-shadow:       0 8px 24px color-mix(in srgb, var(--sf-native-bg) 70%, transparent);
         }
 
         html, body, [class*="css"] {
-            font-family: "Pretendard Variable", "Pretendard", "Noto Sans KR", sans-serif;
+            font-family: "DM Sans", system-ui, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
             color: var(--sf-text);
+            background: var(--sf-bg);
+            -webkit-font-smoothing: antialiased;
         }
 
         .stApp {
-            background:
-                radial-gradient(circle at top left, rgba(220, 91, 67, 0.08), transparent 26%),
-                linear-gradient(180deg, #f8f5ef 0%, #fbfaf7 22%, #f6f3ee 100%);
+            background: var(--sf-bg) !important;
+        }
+
+        [data-testid="stHeader"] {
+            background: color-mix(in srgb, var(--sf-bg) 82%, transparent) !important;
         }
 
         [data-testid="stAppViewContainer"] > .main {
@@ -738,8 +1024,8 @@ def inject_app_shell_styles() -> None:
         }
 
         [data-testid="stSidebar"] {
-            background: linear-gradient(180deg, #f2eee8 0%, #ede9e1 100%);
-            border-right: 1px solid var(--sf-border);
+            background: var(--sf-surface) !important;
+            border-right: 1px solid var(--sf-border) !important;
         }
 
         [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p {
@@ -747,95 +1033,132 @@ def inject_app_shell_styles() -> None:
         }
 
         [data-testid="stSidebar"] .stButton > button {
-            border-radius: 14px;
-            font-weight: 700;
-            min-height: 48px;
+            border-radius: 6px;
+            font-weight: 600;
+            font-size: 13px;
+            min-height: 36px;
         }
 
         div[data-testid="stVerticalBlockBorderWrapper"] {
-            border-radius: 20px;
-            border-color: var(--sf-border);
+            border-radius: 8px;
+            border-color: var(--sf-border-md);
             background: var(--sf-panel);
-            box-shadow: var(--sf-shadow);
+            box-shadow: none;
         }
 
         div[data-testid="stMetric"] {
-            background: rgba(255, 255, 255, 0.72);
-            border: 1px solid var(--sf-border);
-            border-radius: 18px;
-            padding: 14px 16px;
-            min-height: 112px;
-            box-shadow: 0 10px 24px rgba(15, 23, 42, 0.035);
+            background: var(--sf-panel);
+            border: 1px solid var(--sf-border-md);
+            border-radius: 8px;
+            padding: 16px 18px;
+            min-height: 100px;
         }
 
         div[data-testid="stMetricLabel"] {
             color: var(--sf-muted);
-            font-size: 0.82rem;
+            font-size: 0.75rem;
+            font-weight: 600;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
         }
 
         div[data-testid="stMetricValue"] {
-            letter-spacing: -0.03em;
+            letter-spacing: -0.04em;
+            font-weight: 700;
+            font-family: "DM Sans", sans-serif;
         }
 
         .stTabs [data-baseweb="tab-list"] {
-            gap: 20px;
-            border-bottom: 1px solid rgba(15, 23, 42, 0.08);
+            gap: 0;
+            border-bottom: 1px solid var(--sf-border);
             padding-bottom: 0;
+            background: var(--sf-surface);
         }
 
         .stTabs [data-baseweb="tab"] {
             height: auto;
-            padding: 0 0 14px 0;
-            font-weight: 700;
+            padding: 10px 14px 9px;
+            font-weight: 500;
+            font-size: 12px;
             color: var(--sf-muted);
+            background: transparent !important;
         }
 
         .stTabs [aria-selected="true"] {
-            color: var(--sf-accent) !important;
-            border-bottom: 2px solid var(--sf-accent);
+            color: var(--sf-text) !important;
+            border-bottom: 2px solid var(--sf-accent) !important;
         }
 
         [data-testid="stExpander"] details {
-            border-radius: 18px;
-            border: 1px solid var(--sf-border);
-            background: rgba(255, 255, 255, 0.72);
+            border-radius: 8px;
+            border: 1px solid var(--sf-border-md);
+            background: var(--sf-panel);
         }
 
         [data-testid="stExpander"] summary p {
-            font-weight: 700;
+            font-weight: 600;
+            font-size: 13px;
             color: var(--sf-text);
         }
 
         h1, h2, h3 {
-            letter-spacing: -0.035em;
+            letter-spacing: -0.03em;
             color: var(--sf-text);
+            font-family: "DM Sans", sans-serif;
         }
 
-        h1 {
-            font-size: clamp(2.4rem, 4vw, 3.4rem);
-            margin-bottom: 0.2rem;
-        }
-
-        h3 {
-            font-size: 2rem;
-            margin-top: 0.5rem;
-        }
+        h1 { font-size: clamp(1.8rem, 3vw, 2.4rem); margin-bottom: 0.2rem; }
+        h3 { font-size: 1.4rem; margin-top: 0.4rem; }
 
         code {
-            color: #0f766e;
-            background: rgba(15, 118, 110, 0.08);
-            padding: 0.15rem 0.4rem;
-            border-radius: 999px;
+            font-family: "Geist Mono", "JetBrains Mono", monospace;
+            color: var(--sf-accent);
+            background: var(--sf-accent-soft);
+            padding: 0.12rem 0.4rem;
+            border-radius: 4px;
+            font-size: 0.85em;
         }
 
         .stButton > button[kind="primary"] {
-            background: linear-gradient(135deg, #e15b43 0%, #d44b36 100%);
+            background: var(--sf-accent);
             border: none;
+            border-radius: 6px;
+            font-weight: 600;
+            font-size: 13px;
+            letter-spacing: -0.01em;
         }
 
         .stButton > button[kind="secondary"] {
-            background: rgba(255, 255, 255, 0.72);
+            background: transparent;
+            border: 1px solid var(--sf-border-md);
+            border-radius: 6px;
+            color: var(--sf-muted);
+            font-size: 12px;
         }
+
+        .stSelectbox [data-baseweb="select"] > div,
+        .stTextInput > div > div > input,
+        .stTextArea > div > div > textarea,
+        .stNumberInput > div > div > input {
+            background: var(--sf-panel) !important;
+            border-color: var(--sf-border-md) !important;
+            border-radius: 6px !important;
+            color: var(--sf-text) !important;
+            font-size: 12px !important;
+        }
+
+        .stSlider [data-testid="stSliderThumb"] { background: var(--sf-accent) !important; }
+        .stSlider [data-baseweb="slider"] > div > div { background: var(--sf-accent) !important; }
+
+        .stCheckbox [data-testid="stCheckbox"] label span {
+            font-size: 12px;
+            color: var(--sf-muted);
+        }
+
+        p, li, label { color: var(--sf-text); font-size: 13px; }
+        small, .stCaption { color: var(--sf-muted) !important; font-size: 11px !important; }
+
+        [data-testid="stDataFrame"] { border-radius: 8px; overflow: hidden; }
         </style>
         """,
         unsafe_allow_html=True,
@@ -1125,6 +1448,50 @@ def parse_primary_email_asset(path: Path, metadata: dict[str, Any] | None = None
     return subject, body
 
 
+def build_review_email_preview(asset_rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    email_asset = next((row for row in asset_rows if row.get("asset_type") == "email_sequence"), None)
+    if not email_asset:
+        return None
+
+    email_path = Path(str(email_asset["path"]))
+    email_metadata = parse_json_field(email_asset.get("metadata_json"), {})
+
+    try:
+        subject, body, attachments = build_primary_email_payload(asset_rows)
+        attachment_names = [path.name for path in attachments]
+    except Exception:
+        subject, body = parse_primary_email_asset(email_path, email_metadata)
+        attachment_names = []
+
+    return {
+        "subject": subject,
+        "body": body,
+        "attachment_names": attachment_names,
+    }
+
+
+def build_downloadable_asset_payload(asset_row: dict[str, Any]) -> dict[str, Any] | None:
+    asset_path = Path(str(asset_row["path"]))
+    asset_metadata = parse_json_field(asset_row.get("metadata_json"), {})
+    data = read_asset_bytes(asset_path, asset_metadata)
+    if not data:
+        return None
+
+    mime = {
+        ".pdf": "application/pdf",
+        ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ".md": "text/markdown",
+        ".txt": "text/plain",
+    }.get(asset_path.suffix.lower(), "application/octet-stream")
+
+    return {
+        "label": f"{display_asset_type(asset_row.get('asset_type'))} 받기",
+        "file_name": asset_path.name,
+        "mime": mime,
+        "data": data,
+    }
+
+
 def send_test_outbound_email(
     *,
     run_id: str,
@@ -1389,48 +1756,48 @@ def render_pipeline_timeline(tasks: list[dict[str, Any]], latest_run: dict[str, 
 
     status_styles = {
         "completed": {
-            "card_bg": "linear-gradient(180deg, rgba(16,43,37,0.98) 0%, rgba(11,31,27,0.98) 100%)",
-            "border": "#34d399",
-            "dot": "#34d399",
-            "chip_bg": "#dcfce7",
-            "chip_text": "#166534",
-            "connector": "#34d399",
-            "shadow": "0 0 0 5px rgba(52,211,153,0.18)",
+            "card_bg": "var(--sf-panel)",
+            "border": "color-mix(in srgb, var(--sf-green) 30%, transparent)",
+            "dot": "var(--sf-green)",
+            "chip_bg": "var(--sf-green-soft)",
+            "chip_text": "var(--sf-green)",
+            "connector": "color-mix(in srgb, var(--sf-green) 38%, transparent)",
+            "shadow": "none",
         },
         "running": {
-            "card_bg": "linear-gradient(180deg, rgba(16,35,61,0.98) 0%, rgba(10,24,44,0.98) 100%)",
-            "border": "#60a5fa",
-            "dot": "#60a5fa",
-            "chip_bg": "#dbeafe",
-            "chip_text": "#1d4ed8",
-            "connector": "#60a5fa",
-            "shadow": "0 0 0 6px rgba(96,165,250,0.24)",
+            "card_bg": "var(--sf-panel)",
+            "border": "color-mix(in srgb, var(--sf-accent) 34%, transparent)",
+            "dot": "var(--sf-accent)",
+            "chip_bg": "var(--sf-accent-soft)",
+            "chip_text": "var(--sf-accent)",
+            "connector": "color-mix(in srgb, var(--sf-accent) 45%, transparent)",
+            "shadow": "0 0 0 1px color-mix(in srgb, var(--sf-accent) 18%, transparent) inset, 0 8px 24px color-mix(in srgb, var(--sf-accent) 10%, transparent)",
         },
         "waiting_approval": {
-            "card_bg": "linear-gradient(180deg, rgba(48,37,16,0.98) 0%, rgba(36,28,11,0.98) 100%)",
-            "border": "#facc15",
-            "dot": "#facc15",
-            "chip_bg": "#fef3c7",
-            "chip_text": "#92400e",
-            "connector": "#facc15",
-            "shadow": "0 0 0 6px rgba(250,204,21,0.2)",
+            "card_bg": "var(--sf-panel)",
+            "border": "color-mix(in srgb, var(--sf-amber) 30%, transparent)",
+            "dot": "var(--sf-amber)",
+            "chip_bg": "var(--sf-amber-soft)",
+            "chip_text": "var(--sf-amber)",
+            "connector": "color-mix(in srgb, var(--sf-amber) 34%, transparent)",
+            "shadow": "none",
         },
         "failed": {
-            "card_bg": "linear-gradient(180deg, rgba(50,22,26,0.98) 0%, rgba(37,16,19,0.98) 100%)",
-            "border": "#f87171",
-            "dot": "#f87171",
-            "chip_bg": "#fee2e2",
-            "chip_text": "#b91c1c",
-            "connector": "#f87171",
-            "shadow": "0 0 0 6px rgba(248,113,113,0.18)",
+            "card_bg": "var(--sf-panel)",
+            "border": "color-mix(in srgb, var(--sf-red) 28%, transparent)",
+            "dot": "var(--sf-red)",
+            "chip_bg": "var(--sf-red-soft)",
+            "chip_text": "var(--sf-red)",
+            "connector": "color-mix(in srgb, var(--sf-red) 30%, transparent)",
+            "shadow": "none",
         },
         "pending": {
-            "card_bg": "linear-gradient(180deg, rgba(28,35,48,0.98) 0%, rgba(20,25,36,0.98) 100%)",
-            "border": "#64748b",
-            "dot": "#94a3b8",
-            "chip_bg": "#e2e8f0",
-            "chip_text": "#334155",
-            "connector": "rgba(148,163,184,0.35)",
+            "card_bg": "var(--sf-panel)",
+            "border": "var(--sf-border)",
+            "dot": "var(--sf-dim)",
+            "chip_bg": "var(--sf-chip-bg)",
+            "chip_text": "var(--sf-chip-text)",
+            "connector": "var(--sf-border-md)",
             "shadow": "none",
         },
     }
@@ -1441,8 +1808,9 @@ def render_pipeline_timeline(tasks: list[dict[str, Any]], latest_run: dict[str, 
     def status_chip(label: str, status: str | None) -> str:
         style = style_for(status)
         return (
-            f"<span style='display:inline-flex;align-items:center;padding:4px 10px;border-radius:999px;"
-            f"background:{style['chip_bg']};color:{style['chip_text']};font-size:12px;font-weight:800;'>"
+            f"<span style='display:inline-flex;align-items:center;padding:2px 8px;border-radius:4px;"
+            f"font-family:\"Geist Mono\",monospace;"
+            f"background:{style['chip_bg']};color:{style['chip_text']};font-size:10px;font-weight:500;letter-spacing:0.03em;'>"
             f"{html.escape(label)}</span>"
         )
 
@@ -1475,7 +1843,7 @@ def render_pipeline_timeline(tasks: list[dict[str, Any]], latest_run: dict[str, 
                 "<div style='margin-top:10px;display:flex;flex-wrap:wrap;gap:6px;'>"
                 + "".join(
                     f"<span style='display:inline-flex;align-items:center;padding:4px 8px;border-radius:999px;"
-                    f"background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.08);"
+                    f"background:var(--sf-chip-bg);border:1px solid var(--sf-chip-border);"
                     f"font-size:11px;font-weight:700;'>{html.escape(item)}</span>"
                     for item in stage["support"]
                 )
@@ -1484,34 +1852,36 @@ def render_pipeline_timeline(tasks: list[dict[str, Any]], latest_run: dict[str, 
 
         connector_html = ""
         if index < len(stages) - 1:
-            connector_color = style["connector"] if stage.get("status") in {"completed", "running", "waiting_approval", "failed"} else "rgba(148,163,184,0.28)"
+            connector_color = style["connector"] if stage.get("status") in {"completed", "running", "waiting_approval", "failed"} else "var(--sf-border)"
             connector_html = (
-                f"<div style='width:72px;min-width:72px;height:4px;border-radius:999px;background:{connector_color};"
-                "margin:34px 0 0 14px;opacity:0.95;'></div>"
+                f"<div style='width:48px;min-width:48px;height:1px;background:{connector_color};"
+                "margin:30px 0 0 8px;'></div>"
             )
 
         stage_blocks.append(
             f"""
-            <div style="display:flex;align-items:flex-start;min-width:320px;flex:0 0 320px;">
-                <div style="display:flex;flex-direction:column;align-items:center;padding-top:24px;">
-                    <div style="width:18px;height:18px;border-radius:999px;background:{style['dot']};
-                    box-shadow:{style['shadow']};border:2px solid rgba(255,255,255,0.16);"></div>
-                    <div style="margin-top:8px;font-size:11px;font-weight:800;letter-spacing:0.04em;opacity:0.62;">
+            <div style="display:flex;align-items:flex-start;min-width:220px;flex:0 0 220px;">
+                <div style="display:flex;flex-direction:column;align-items:center;padding-top:20px;">
+                    <div style="width:8px;height:8px;border-radius:50%;background:{style['dot']};
+                    box-shadow:0 0 6px {style['dot']};border:1px solid var(--sf-bg);"></div>
+                    <div style="margin-top:6px;font-family:'Geist Mono',monospace;font-size:9px;
+                    font-weight:500;letter-spacing:0.05em;color:var(--sf-dim);">
                         {html.escape(stage.get('index_label', str(index + 1)))}
                     </div>
                 </div>
-                <div style="margin-left:12px;flex:1;background:{style['card_bg']};border:1px solid {style['border']};
-                border-radius:18px;padding:16px 16px 14px;min-height:188px;">
-                    <div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start;">
-                        <div style="font-size:11px;font-weight:800;letter-spacing:0.05em;text-transform:uppercase;
-                        color:{style['border']};opacity:0.98;">{html.escape(stage['department'])}</div>
+                <div style="margin-left:10px;flex:1;background:{style['card_bg']};border:1px solid {style['border']};
+                box-shadow:{style['shadow']};border-radius:8px;padding:12px 14px;min-height:160px;">
+                    <div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start;margin-bottom:6px;">
+                        <div style="font-family:'Geist Mono',monospace;font-size:9px;font-weight:500;
+                        letter-spacing:0.07em;text-transform:uppercase;
+                        color:{style['dot']};opacity:0.9;">{html.escape(stage['department'])}</div>
                         {status_chip(stage['status_label'], stage.get('status'))}
                     </div>
-                    <div style="font-size:20px;font-weight:800;line-height:1.24;margin:8px 0 10px 0;">{html.escape(stage['task_label'])}</div>
-                    <div style="font-size:13px;font-weight:700;opacity:0.9;">담당 {html.escape(stage['owner_label'])}</div>
-                    <div style="font-size:12px;opacity:0.72;margin-top:4px;line-height:1.55;">{html.escape(stage['summary'])}</div>
-                    <div style="font-size:12px;font-weight:800;opacity:0.95;margin-top:10px;">{html.escape(stage.get('duration_label') or '-')}</div>
-                    <div style="font-size:12px;opacity:0.8;margin-top:10px;line-height:1.55;">{html.escape(stage['note'])}</div>
+                    <div style="font-size:15px;font-weight:600;line-height:1.25;margin-bottom:6px;letter-spacing:-0.02em;">{html.escape(stage['task_label'])}</div>
+                    <div style="font-size:11px;color:var(--sf-muted);margin-bottom:6px;">{html.escape(stage['owner_label'])}</div>
+                    <div style="font-size:11px;color:var(--sf-muted);line-height:1.5;">{html.escape(stage['summary'])}</div>
+                    <div style="font-family:'Geist Mono',monospace;font-size:10px;color:var(--sf-dim);margin-top:8px;">{html.escape(stage.get('duration_label') or '')}</div>
+                    <div style="font-size:11px;color:var(--sf-muted);margin-top:6px;line-height:1.5;">{html.escape(stage['note'])}</div>
                     {support_html}
                 </div>
                 {connector_html}
@@ -1539,6 +1909,9 @@ def render_dashboard(latest_run: dict[str, Any] | None) -> None:
         return
 
     st.session_state.pop("run_just_launched", None)
+    tasks = list_tasks(latest_run["id"])
+    focus_task_name = infer_run_focus_task_name(latest_run, tasks)
+    issue = summarize_run_issue(latest_run, tasks)
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("상태", display_status(latest_run.get("status")))
@@ -1547,10 +1920,10 @@ def render_dashboard(latest_run: dict[str, Any] | None) -> None:
     c4.metric("토큰 사용량", f"{latest_run.get('total_tokens', 0):,}")
 
     c5, c6, c7, c8 = st.columns(4)
-    c5.metric("현재 작업", display_task_name(latest_run.get("current_task")))
-    current_members = get_department_members(latest_run.get("current_task"))
+    c5.metric("현재 작업", display_task_name(focus_task_name))
+    current_members = get_department_members(focus_task_name)
     current_staff = current_members[0] if current_members else {"name": "-", "crew_label": "-"}
-    c6.metric("현재 담당", f"{current_staff['name']} ({display_task_name(current_staff['crew_label'])})")
+    c6.metric("현재 담당", current_staff["name"])
     c7.metric("예상 비용", f"${float(latest_run.get('estimated_cost_usd', 0) or 0):.4f}")
     c8.metric("마지막 갱신", format_local_datetime(latest_run.get("last_heartbeat_at")))
 
@@ -1571,10 +1944,27 @@ def render_dashboard(latest_run: dict[str, Any] | None) -> None:
             _parts.append(f"차단 {auto_summary['blocked_count']}건")
         st.caption(" · ".join(_parts))
 
-    if latest_run.get("error_message"):
-        st.error(latest_run["error_message"])
+    if issue:
+        render_run_issue_banner(issue)
+        if issue.get("raw_error"):
+            with st.expander("원문 오류 보기", expanded=False):
+                st.code(issue["raw_error"], language="text")
+    elif latest_run.get("status") in {"completed", "auto_sent"}:
+        success_title = "자동 발송 완료" if latest_run.get("status") == "auto_sent" else "실행 완료"
+        success_summary = (
+            f"{display_country(latest_run.get('target_country'))} 대상 실행이 끝났고 "
+            f"산출물 {summarize_asset_rows(list_assets(latest_run.get('id'))).get('asset_count', 0)}건이 준비되었습니다."
+        )
+        success_action = "산출물 탭에서 결과를 확인하고, 필요하면 다음 세그먼트 일정으로 이어가세요."
+        render_run_issue_banner(
+            {
+                "severity": "success",
+                "title": success_title,
+                "summary": success_summary,
+                "action": success_action,
+            }
+        )
 
-    tasks = list_tasks(latest_run["id"])
     if not tasks:
         with st.expander("실제 실행 로그", expanded=str(latest_run.get("status") or "") in {"running", "failed"}):
             render_run_log_panel(latest_run, key_prefix=f"latest_run_log_{latest_run.get('id', 'latest')}")
@@ -1593,18 +1983,18 @@ def render_dashboard(latest_run: dict[str, Any] | None) -> None:
         agent_role = rt_agent.get("role", "") if rt_agent else ""
         st.markdown(
             f"""
-            <div style="border:1px solid #60a5fa;border-radius:12px;background:#10233d;
-            padding:16px 20px;margin-bottom:16px;display:flex;align-items:center;gap:16px;">
-                <div style="width:12px;height:12px;border-radius:50%;background:#60a5fa;
-                box-shadow:0 0 0 3px rgba(96,165,250,0.3);flex-shrink:0;"></div>
+            <div style="border:1px solid var(--sf-accent);border-radius:14px;background:var(--sf-panel);
+            box-shadow:0 0 0 4px color-mix(in srgb, var(--sf-accent) 10%, transparent), 0 18px 38px color-mix(in srgb, var(--sf-accent) 8%, transparent);
+            padding:16px 20px;margin-bottom:16px;display:flex;align-items:center;gap:16px;color:var(--sf-text);">
+                <div style="width:12px;height:12px;border-radius:50%;background:var(--sf-accent);
+                box-shadow:0 0 0 4px color-mix(in srgb, var(--sf-accent) 18%, transparent);flex-shrink:0;"></div>
                 <div>
                     <div style="font-size:11px;font-weight:800;letter-spacing:0.06em;
-                    text-transform:uppercase;color:#60a5fa;margin-bottom:4px;">지금 일하는 에이전트</div>
+                    text-transform:uppercase;color:var(--sf-accent);margin-bottom:4px;">지금 일하는 에이전트</div>
                     <div style="font-size:18px;font-weight:800;line-height:1.2;">{html.escape(agent_name)}</div>
-                    {f'<div style="font-size:13px;opacity:0.75;margin-top:3px;">{html.escape(agent_role)}</div>' if agent_role else ""}
-                    <div style="font-size:12px;opacity:0.6;margin-top:4px;">
+                    {f'<div style="font-size:13px;color:var(--sf-muted);margin-top:3px;">{html.escape(agent_role)}</div>' if agent_role else ""}
+                    <div style="font-size:12px;color:var(--sf-muted);margin-top:4px;">
                         작업: {html.escape(display_task_name(rt.get("task_name")))} &nbsp;·&nbsp;
-                        모델: {html.escape(rt.get("model_name") or "-")} &nbsp;·&nbsp;
                         토큰: {int(rt.get("total_tokens", 0) or 0):,}
                     </div>
                 </div>
@@ -1644,11 +2034,11 @@ def render_dashboard(latest_run: dict[str, Any] | None) -> None:
 
 def render_department_board(tasks: list[dict[str, Any]], latest_run: dict[str, Any]) -> None:
     status_palette = {
-        "completed": {"bg": "#0f2b25", "border": "#34d399", "badge_bg": "#dcfce7", "badge_text": "#166534"},
-        "running": {"bg": "#10233d", "border": "#60a5fa", "badge_bg": "#dbeafe", "badge_text": "#1d4ed8"},
-        "waiting_approval": {"bg": "#302510", "border": "#facc15", "badge_bg": "#fef3c7", "badge_text": "#92400e"},
-        "pending": {"bg": "#1c2330", "border": "#94a3b8", "badge_bg": "#e2e8f0", "badge_text": "#334155"},
-        "failed": {"bg": "#32161a", "border": "#f87171", "badge_bg": "#fee2e2", "badge_text": "#b91c1c"},
+        "completed": {"bg": "var(--sf-panel)", "border": "color-mix(in srgb, var(--sf-green) 28%, transparent)",  "badge_bg": "var(--sf-green-soft)",  "badge_text": "var(--sf-green)"},
+        "running":   {"bg": "var(--sf-panel)", "border": "color-mix(in srgb, var(--sf-accent) 32%, transparent)",  "badge_bg": "var(--sf-accent-soft)",  "badge_text": "var(--sf-accent)"},
+        "waiting_approval": {"bg": "var(--sf-panel)", "border": "color-mix(in srgb, var(--sf-amber) 28%, transparent)", "badge_bg": "var(--sf-amber-soft)", "badge_text": "var(--sf-amber)"},
+        "pending":   {"bg": "var(--sf-panel)", "border": "var(--sf-border)", "badge_bg": "var(--sf-chip-bg)", "badge_text": "var(--sf-chip-text)"},
+        "failed":    {"bg": "var(--sf-panel)", "border": "color-mix(in srgb, var(--sf-red) 28%, transparent)",   "badge_bg": "var(--sf-red-soft)",   "badge_text": "var(--sf-red)"},
     }
 
     def palette_for(status: str | None) -> dict[str, str]:
@@ -1666,9 +2056,9 @@ def render_department_board(tasks: list[dict[str, Any]], latest_run: dict[str, A
         if not items:
             return ""
         return "".join(
-            f"<span style='display:inline-flex;align-items:center;padding:4px 8px;border-radius:999px;"
-            f"background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.08);"
-            f"font-size:12px;font-weight:700;margin:0 6px 6px 0;'>{html.escape(item)}</span>"
+            f"<span style='display:inline-flex;align-items:center;padding:2px 7px;border-radius:4px;"
+            f"background:var(--sf-chip-bg);border:1px solid var(--sf-chip-border);"
+            f"font-size:11px;font-weight:500;margin:0 5px 5px 0;color:var(--sf-chip-text);'>{html.escape(item)}</span>"
             for item in items
         )
 
@@ -1698,23 +2088,24 @@ def render_department_board(tasks: list[dict[str, Any]], latest_run: dict[str, A
             with left:
                 st.markdown(
                     f"""
-                    <div style="width:40px;height:40px;border-radius:999px;background:{palette['bg']};
+                    <div style="width:32px;height:32px;border-radius:6px;background:{palette['bg']};
                     border:1px solid {palette['border']};display:flex;align-items:center;justify-content:center;
-                    font-weight:800;font-size:16px;">{index}</div>
+                    font-family:'Geist Mono',monospace;font-weight:600;font-size:12px;color:var(--sf-muted);">{index}</div>
                     """,
                     unsafe_allow_html=True,
                 )
             with center:
                 st.markdown(
                     f"""
-                    <div style="font-size:12px;font-weight:800;letter-spacing:0.04em;text-transform:uppercase;
-                    color:{palette['border']};margin-bottom:6px;">{html.escape(config['department'])}</div>
-                    <div style="font-size:22px;font-weight:800;line-height:1.2;margin-bottom:6px;">{html.escape(display_task_name(row.get("task_name")))}</div>
-                    <div style="font-size:14px;opacity:0.9;margin-bottom:8px;">{html.escape(config.get("summary") or "")}</div>
-                    <div style="font-size:13px;font-weight:800;opacity:0.95;margin-bottom:6px;">참여 직원</div>
+                    <div style="font-family:'Geist Mono',monospace;font-size:9px;font-weight:500;
+                    letter-spacing:0.07em;text-transform:uppercase;
+                    color:{palette['badge_text']};margin-bottom:5px;">{html.escape(config['department'])}</div>
+                    <div style="font-size:17px;font-weight:600;line-height:1.2;margin-bottom:5px;letter-spacing:-0.02em;">{html.escape(display_task_name(row.get("task_name")))}</div>
+                    <div style="font-size:12px;color:var(--sf-muted);margin-bottom:8px;">{html.escape(config.get("summary") or "")}</div>
+                    <div style="font-size:11px;font-weight:600;color:var(--sf-muted);margin-bottom:5px;letter-spacing:0.03em;text-transform:uppercase;">참여 직원</div>
                     {member_lines(members)}
-                    <div style="font-size:12px;opacity:0.7;margin-top:4px;">실행 모델: {html.escape(row.get("model_name") or "-")}</div>
-                    <div style="margin-top:10px;">{support_badges(config.get("support", []))}</div>
+                    <div style="font-family:'Geist Mono',monospace;font-size:10px;color:var(--sf-dim);margin-top:4px;">모델: {html.escape(row.get("model_name") or "-")}</div>
+                    <div style="margin-top:8px;">{support_badges(config.get("support", []))}</div>
                     """,
                     unsafe_allow_html=True,
                 )
@@ -1724,37 +2115,37 @@ def render_department_board(tasks: list[dict[str, Any]], latest_run: dict[str, A
                 st.caption(f"비용 ${float(row.get('estimated_cost_usd', 0) or 0):.4f}")
 
         if index < len(tasks):
-            st.markdown("<div style='padding:4px 0 10px 22px;color:#64748b;'>↓</div>", unsafe_allow_html=True)
+            st.markdown("<div style='padding:4px 0 10px 22px;color:var(--sf-muted);'>↓</div>", unsafe_allow_html=True)
 
     waiting_items = [item for item in list_approval_items("waiting_approval") if item.get("run_id") == latest_run.get("id")]
     approval_status = latest_run.get("status")
     if approval_status in {"waiting_approval", "rejected"} or waiting_items:
-        st.markdown("<div style='padding:4px 0 10px 22px;color:#64748b;'>↓</div>", unsafe_allow_html=True)
+        st.markdown("<div style='padding:4px 0 10px 22px;color:var(--sf-muted);'>↓</div>", unsafe_allow_html=True)
         palette = palette_for("waiting_approval" if approval_status == "waiting_approval" else "pending")
         with st.container(border=True):
             left, center, right = st.columns([0.9, 6.3, 2.0])
             with left:
                 st.markdown(
                     f"""
-                    <div style="width:40px;height:40px;border-radius:999px;background:{palette['bg']};
+                    <div style="width:32px;height:32px;border-radius:6px;background:{palette['bg']};
                     border:1px solid {palette['border']};display:flex;align-items:center;justify-content:center;
-                    font-weight:800;font-size:16px;">S</div>
+                    font-family:'Geist Mono',monospace;font-weight:600;font-size:12px;color:var(--sf-amber);">S</div>
                     """,
                     unsafe_allow_html=True,
                 )
             with center:
                 st.markdown(
                     """
-                    <div style="font-size:12px;font-weight:800;letter-spacing:0.04em;text-transform:uppercase;
-                    color:#facc15;margin-bottom:6px;">검토 운영본부</div>
-                    <div style="font-size:22px;font-weight:800;line-height:1.2;margin-bottom:6px;">승인 판단 / 반려 재작업 조정</div>
-                    <div style="font-size:14px;opacity:0.9;margin-bottom:8px;">승인이 필요한 산출물을 확인하고, 필요한 경우 재작업 방향을 바로 지시할 수 있습니다.</div>
-                    <div style="font-size:13px;font-weight:800;opacity:0.95;margin-bottom:4px;">담당 직원: 오세훈 과장, 남예린 대리</div>
-                    <div style="font-size:13px;opacity:0.85;margin-bottom:4px;">맡은 역할: 승인 필요 항목 선별, 반려 사유 분석, 재작업 라우팅</div>
-                    <div style="font-size:13px;opacity:0.85;">한 줄 비전: 사람이 꼭 봐야 할 결정만 남기고, 나머지는 흐름이 끊기지 않게 이어갑니다.</div>
-                    <div style="margin-top:10px;">
-                        <span style='display:inline-flex;align-items:center;padding:4px 8px;border-radius:999px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.08);font-size:12px;font-weight:700;margin:0 6px 6px 0;'>승인 판단팀</span>
-                        <span style='display:inline-flex;align-items:center;padding:4px 8px;border-radius:999px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.08);font-size:12px;font-weight:700;margin:0 6px 6px 0;'>재작업 조정팀</span>
+                    <div style="font-family:'Geist Mono',monospace;font-size:9px;font-weight:500;
+                    letter-spacing:0.07em;text-transform:uppercase;color:var(--sf-amber);margin-bottom:5px;">검토 운영본부</div>
+                    <div style="font-size:17px;font-weight:600;line-height:1.2;margin-bottom:5px;letter-spacing:-0.02em;">승인 판단 / 반려 재작업 조정</div>
+                    <div style="font-size:12px;color:var(--sf-muted);margin-bottom:8px;">승인이 필요한 산출물을 확인하고, 필요한 경우 재작업 방향을 바로 지시할 수 있습니다.</div>
+                    <div style="font-size:11px;font-weight:600;color:var(--sf-muted);margin-bottom:4px;">담당 직원: 오세훈 과장, 남예린 대리</div>
+                    <div style="font-size:11px;color:var(--sf-muted);margin-bottom:3px;">맡은 역할: 승인 필요 항목 선별, 반려 사유 분석, 재작업 라우팅</div>
+                    <div style="font-size:11px;color:var(--sf-muted);">한 줄 비전: 사람이 꼭 봐야 할 결정만 남기고, 나머지는 흐름이 끊기지 않게 이어갑니다.</div>
+                    <div style="margin-top:8px;">
+                        <span style='display:inline-flex;align-items:center;padding:2px 7px;border-radius:4px;background:var(--sf-chip-bg);border:1px solid var(--sf-chip-border);font-size:11px;font-weight:500;margin:0 5px 5px 0;color:var(--sf-chip-text);'>승인 판단팀</span>
+                        <span style='display:inline-flex;align-items:center;padding:2px 7px;border-radius:4px;background:var(--sf-chip-bg);border:1px solid var(--sf-chip-border);font-size:11px;font-weight:500;margin:0 5px 5px 0;color:var(--sf-chip-text);'>재작업 조정팀</span>
                     </div>
                     """,
                     unsafe_allow_html=True,
@@ -2012,8 +2403,12 @@ def render_segment_calendar_tab(*, notify_email: str, test_mode: bool) -> None:
     preset_lookup = {preset["id"]: preset for preset in presets}
 
     for preset in presets:
-        with st.container(border=True):
-            st.markdown(f"##### {preset['label']}")
+        preset_title = (
+            f"{preset['label']} | "
+            f"{', '.join(display_country(code) for code in preset['recommended_countries'])} | "
+            f"리드 목표 {preset.get('default_max_companies', '-')}"
+        )
+        with st.expander(preset_title, expanded=False):
             st.write(preset["description"])
             st.write(f"오퍼: `{preset['offer']}`")
             st.write(f"추천 국가: {', '.join(display_country(code) for code in preset['recommended_countries'])}")
@@ -2076,10 +2471,12 @@ def render_segment_calendar_tab(*, notify_email: str, test_mode: bool) -> None:
     else:
         for row in selected_rows:
             preset = get_segment_preset(str(row.get("segment_id") or ""))
-            with st.container(border=True):
-                st.markdown(
-                    f"##### {row.get('segment_label', '-')} | {display_country(row.get('target_country'))} ({row.get('target_country')}) | {row.get('send_window')}"
-                )
+            row_title = (
+                f"{row.get('segment_label', '-')} | "
+                f"{display_country(row.get('target_country'))} ({row.get('target_country')}) | "
+                f"{row.get('send_window')} | 목표 {row.get('max_companies')}"
+            )
+            with st.expander(row_title, expanded=False):
                 if preset:
                     st.write(f"오퍼: `{preset['offer']}`")
                 st.write(f"신규 리드 목표: `{row.get('max_companies')}`")
@@ -2217,31 +2614,82 @@ def render_runs(key_prefix: str = "runs") -> dict[str, Any] | None:
         st.info("선택한 날짜의 실행 기록이 없습니다.")
         return None
 
-    labels = [
-        f"{row['started_at']} | {display_country(row['target_country'])} | {display_status(row['status'])} | {row['id'][:8]}"
-        for row in filtered_runs
-    ]
-    selected_label = st.selectbox("확인할 실행", labels, index=0, key=f"{key_prefix}_select_run")
-    selected_run = filtered_runs[labels.index(selected_label)]
+    selection_key = f"{key_prefix}_selected_run_id"
+    valid_run_ids = {row["id"] for row in filtered_runs}
+    if st.session_state.get(selection_key) not in valid_run_ids:
+        st.session_state[selection_key] = filtered_runs[0]["id"]
 
-    st.dataframe(
-        [
-            {
-                "시작 시각": row["started_at"],
-                "국가": display_country(row["target_country"]),
-                "상태": display_status(row["status"]),
-                "탐색 모드": "자동" if parse_json_field(row.get("metadata_json"), {}).get("auto_mode") else "수동",
-                "탐색 기준": row["lead_query"],
-                "검토 대기": row["approval_count"],
-                "토큰": row["total_tokens"],
-                "비용(USD)": row["estimated_cost_usd"],
-                "실행 ID": row["id"],
-            }
-            for row in filtered_runs
-        ],
-        hide_index=True,
-        use_container_width=True,
-    )
+    st.caption("최근 실행 5개를 카드로 먼저 보고, 자세한 표는 아래에서 펼쳐보세요.")
+    for row in filtered_runs[:5]:
+        asset_rows = list_assets(row["id"])
+        asset_summary = summarize_asset_rows(asset_rows)
+        issue = summarize_run_issue(row)
+        is_selected = st.session_state.get(selection_key) == row["id"]
+        with st.container(border=True):
+            top_left, top_mid, top_right = st.columns([2.7, 1.1, 1.1])
+            with top_left:
+                st.markdown(f"**{display_status(row.get('status'))} · {format_local_datetime(row.get('started_at'))}**")
+                st.caption(f"{get_run_segment_label(row)} | {display_country(row.get('target_country'))}")
+            with top_mid:
+                st.metric("생성 수", str(asset_summary["asset_count"]))
+            with top_right:
+                st.metric("회사 수", str(asset_summary["company_count"]))
+
+            detail_left, detail_mid, detail_right = st.columns([1.2, 1.2, 3.0])
+            detail_left.caption(f"검토 대기 {int(row.get('approval_count', 0) or 0)}건")
+            detail_mid.caption(f"비용 ${float(row.get('estimated_cost_usd', 0) or 0):.4f}")
+            if issue:
+                detail_right.caption(f"{issue['title']} | {issue['action']}")
+            else:
+                detail_right.caption((row.get("lead_query") or "-")[:120])
+
+            action_label = "선택됨" if is_selected else "이 실행 보기"
+            if st.button(action_label, key=f"{key_prefix}_pick_{row['id']}", use_container_width=True, disabled=is_selected):
+                st.session_state[selection_key] = row["id"]
+                st.rerun()
+
+    selected_run = next((row for row in filtered_runs if row["id"] == st.session_state.get(selection_key)), filtered_runs[0])
+
+    with st.expander("전체 실행 기록 표", expanded=False):
+        selected_run_id = st.selectbox(
+            "확인할 실행",
+            options=[row["id"] for row in filtered_runs],
+            index=max(0, [row["id"] for row in filtered_runs].index(selected_run["id"])),
+            key=f"{key_prefix}_select_run",
+            format_func=lambda run_id: next(
+                (
+                    f"{format_local_datetime(row['started_at'])} | "
+                    f"{display_country(row['target_country'])} | "
+                    f"{display_status(row['status'])} | "
+                    f"{get_run_segment_label(row)}"
+                    for row in filtered_runs
+                    if row["id"] == run_id
+                ),
+                str(run_id),
+            ),
+        )
+        selected_run = next((row for row in filtered_runs if row["id"] == selected_run_id), filtered_runs[0])
+
+        st.dataframe(
+            [
+                {
+                    "시작 시각": row["started_at"],
+                    "국가": display_country(row["target_country"]),
+                    "상태": display_status(row["status"]),
+                    "세그먼트": get_run_segment_label(row),
+                    "실행 방식": "자동 추천" if get_run_metadata(row).get("auto_mode") else "직접 지정",
+                    "탐색 기준": row["lead_query"],
+                    "검토 대기": row["approval_count"],
+                    "토큰": row["total_tokens"],
+                    "비용(USD)": row["estimated_cost_usd"],
+                }
+                for row in filtered_runs
+            ],
+            hide_index=True,
+            use_container_width=True,
+        )
+
+    st.session_state[selection_key] = selected_run["id"]
     return selected_run
 
 
@@ -2257,10 +2705,19 @@ def render_approval_queue(test_recipient: str) -> None:
         row for row in recent
         if (parse_iso_date(row.get("decided_at")) or parse_iso_date(row.get("created_at"))) == selected_date
     ]
+    urgent_waiting = [row for row in waiting if is_urgent_approval_item(row)]
+    completed_today = [row for row in recent if row.get("status") in {"approved", "rejected"}]
+
+    summary_cols = st.columns(3)
+    summary_cols[0].metric("오늘 검토 건수", str(len(waiting)))
+    summary_cols[1].metric("긴급 처리", str(len(urgent_waiting)))
+    summary_cols[2].metric("오늘 처리 완료", str(len(completed_today)))
+
     if not waiting:
         st.info("검토 대기 중인 항목이 없습니다.")
     else:
-        for item in waiting:
+        ordered_waiting = sorted(waiting, key=lambda row: (0 if is_urgent_approval_item(row) else 1, -int(row.get("priority", 0) or 0)))
+        for item in ordered_waiting:
             with st.expander(f"{item.get('company_name') or '-'} | {item['title']}"):
                 metadata = parse_json_field(item.get("metadata_json"), {})
                 bundle_ids = parse_json_field(item.get("asset_bundle_json"), [])
@@ -2270,9 +2727,15 @@ def render_approval_queue(test_recipient: str) -> None:
                 blocked_reasons = auto_delivery.get("blocked_reasons") or []
                 if blocked_reasons:
                     st.warning("자동발송 차단 이유: " + " | ".join(blocked_reasons[:3]))
+                if is_urgent_approval_item(item):
+                    st.error("긴급 확인이 필요한 항목입니다. 차단 사유 또는 품질 이슈가 함께 잡혔습니다.")
 
                 if asset_rows:
                     proposal_asset = next((row for row in asset_rows if row["asset_type"] == "proposal"), None)
+                    email_preview = build_review_email_preview(asset_rows)
+                    downloadable_assets = [
+                        row for row in asset_rows if row.get("asset_type") in {"proposal_pdf", "proposal_docx"}
+                    ]
                     if proposal_asset:
                         quality = evaluate_proposal_asset(proposal_asset)
                         summary = f"제안서 품질: {quality['score']}점 ({quality['label']})"
@@ -2286,13 +2749,54 @@ def render_approval_queue(test_recipient: str) -> None:
                                 "회사명": row["company_name"],
                                 "종류": display_asset_type(row["asset_type"]),
                                 "이름": row["title"],
-                                "파일 위치": row["path"],
+                                "파일명": Path(str(row["path"])).name,
                             }
                             for row in asset_rows
                         ],
                         hide_index=True,
                         use_container_width=True,
                     )
+
+                    action_cols = st.columns(2)
+                    with action_cols[0]:
+                        st.markdown("**제안서 바로 확인**")
+                        if downloadable_assets:
+                            for asset_row in downloadable_assets:
+                                payload = build_downloadable_asset_payload(asset_row)
+                                if payload:
+                                    st.download_button(
+                                        label=payload["label"],
+                                        data=payload["data"],
+                                        file_name=payload["file_name"],
+                                        mime=payload["mime"],
+                                        key=f"review_download_{item['id']}_{asset_row['asset_type']}",
+                                        use_container_width=True,
+                                    )
+                        else:
+                            st.caption("다운로드 가능한 제안서 파일이 없습니다.")
+
+                    with action_cols[1]:
+                        st.markdown("**메일 첨부 안내**")
+                        if email_preview and email_preview["attachment_names"]:
+                            st.caption(", ".join(email_preview["attachment_names"]))
+                        else:
+                            st.caption("첨부 파일 정보가 아직 없습니다.")
+
+                    if email_preview:
+                        st.markdown("**발송 메일 미리보기**")
+                        st.text_input(
+                            "메일 제목",
+                            value=email_preview["subject"],
+                            disabled=True,
+                            key=f"review_email_subject_{item['id']}",
+                        )
+                        st.text_area(
+                            "메일 본문",
+                            value=email_preview["body"],
+                            height=240,
+                            disabled=True,
+                            key=f"review_email_body_{item['id']}",
+                        )
 
                 rejection_reason = st.text_area(
                     "반려 사유",
@@ -2351,7 +2855,8 @@ def render_approval_queue(test_recipient: str) -> None:
                 "회사명": row["company_name"],
                 "항목": row["title"],
                 "상태": display_status(row["status"]),
-                "재작업 대상": row["reroute_targets_json"],
+                "재작업 대상": format_reroute_targets(row.get("reroute_targets_json")),
+                "메모": (row.get("rejection_reason") or "-")[:120],
                 "처리 시각": row["decided_at"],
             }
             for row in recent[:20]
@@ -2361,12 +2866,27 @@ def render_approval_queue(test_recipient: str) -> None:
     )
 
 
-def render_assets(selected_run: dict[str, Any] | None) -> None:
-    st.subheader("산출물")
+def render_assets(selected_run: dict[str, Any] | None, *, show_subheader: bool = True, show_summary: bool = True) -> None:
+    if show_subheader:
+        st.subheader("산출물")
     assets = list_assets(selected_run["id"] if selected_run else None)
     if not assets:
+        if show_summary:
+            summary_cols = st.columns(4)
+            summary_cols[0].metric("최근 생성 산출물", "0")
+            summary_cols[1].metric("전체 산출물", "0")
+            summary_cols[2].metric("제안서 원본", "0")
+            summary_cols[3].metric("PDF 완료", "0")
         st.info("산출물이 아직 없습니다.")
         return
+
+    asset_summary = summarize_asset_rows(assets)
+    if show_summary:
+        summary_cols = st.columns(4)
+        summary_cols[0].metric("최근 생성 산출물", str(asset_summary["today_count"]))
+        summary_cols[1].metric("전체 산출물", str(asset_summary["asset_count"]))
+        summary_cols[2].metric("제안서 원본", str(asset_summary["proposal_count"]))
+        summary_cols[3].metric("PDF 완료", str(asset_summary["pdf_count"]))
 
     companies = sorted({row["company_name"] for row in assets if row.get("company_name")})
     company_filter = st.selectbox("회사 선택", ["전체"] + companies, index=0)
@@ -2380,7 +2900,7 @@ def render_assets(selected_run: dict[str, Any] | None) -> None:
                 "이름": row["title"],
                 "상태": display_status(row["status"]),
                 "생성 시각": row["created_at"],
-                "파일 위치": row["path"],
+                "파일명": Path(str(row["path"])).name,
             }
             for row in filtered_assets
         ],
@@ -2397,13 +2917,17 @@ def render_assets(selected_run: dict[str, Any] | None) -> None:
     asset_path = Path(selected_asset["path"])
     asset_metadata = parse_json_field(selected_asset.get("metadata_json"), {})
 
-    st.caption(str(asset_path))
+    st.caption(f"저장 파일: {asset_path.name}")
     if selected_asset["asset_type"] == "proposal":
         quality = evaluate_proposal_asset(selected_asset)
         summary = f"제안서 품질: {quality['score']}점 ({quality['label']})"
         if quality["missing_sections"]:
             summary += f" | 빠진 섹션: {', '.join(quality['missing_sections'][:4])}"
         st.caption(summary)
+
+    with st.expander("기술 정보", expanded=False):
+        st.caption(f"실행 세그먼트: {get_run_segment_label(selected_run)}" if selected_run else "실행 세그먼트 정보 없음")
+        st.code(str(asset_path), language="text")
 
     if asset_path.suffix.lower() == ".pdf":
         data = read_asset_bytes(asset_path, asset_metadata)
@@ -2505,8 +3029,8 @@ def render_settings() -> None:
     st.caption("기본 화면에는 핵심 운영값만 남기고, 세부 환경과 기준값은 아래 섹션에서 확인하도록 정리했습니다.")
 
     summary_cols = st.columns(4)
-    summary_cols[0].metric("실행 백엔드", backend_info["label"])
-    summary_cols[1].metric("자동 발송 모드", auto_send_settings.mode)
+    summary_cols[0].metric("저장 상태", display_storage_status(backend_info))
+    summary_cols[1].metric("자동 발송 모드", display_delivery_mode(auto_send_settings.mode))
     summary_cols[2].metric("부서 기준 평균", f"{average_baseline}분")
     summary_cols[3].metric("최근 로그", f"{len(log_files)}개")
 
@@ -2607,7 +3131,7 @@ def render_settings() -> None:
                 with right:
                     st.markdown("**참여 인원**")
                     for member in members:
-                        st.markdown(f"- **{member['name']}** (`{member['crew_label']}`)")
+                        st.markdown(f"- **{member['name']}** (`{display_task_name(member['crew_label'])}`)")
                         st.caption(f"맡은 역할: {member['role']}")
                         st.caption(f"집중 비전: {member['vision']}")
                     if support:
@@ -2621,119 +3145,6 @@ def render_settings() -> None:
                 for member_name, member_role in team["members"]:
                     st.markdown(f"- **{member_name}**: {member_role}")
     return
-    st.subheader("운영 설정")
-    st.write(f"프로젝트 위치: `{PROJECT_ROOT}`")
-    st.write(f"운영 DB: `{DB_PATH}`")
-    st.write(f"파이썬 실행 파일: `{resolve_python_executable()}`")
-    st.write(f"기본 알림 메일: `{os.environ.get('ALERT_EMAIL_TO', ALERT_EMAIL_DEFAULT)}`")
-    st.write(f"현재 저장소 백엔드: `{backend_info['label']}`")
-    if backend_info.get("remote_url"):
-        st.write(f"Supabase URL: `{backend_info['remote_url']}`")
-    if backend_info.get("storage_bucket"):
-        st.write(f"Supabase Storage 버킷: `{backend_info['storage_bucket']}`")
-    if backend_info["backend"] == "supabase":
-        st.info("Notion 매핑은 아직 연결하지 않았습니다. 현재는 Supabase를 운영 원본으로 사용합니다.")
-    else:
-        st.info("Notion 매핑은 아직 연결하지 않았습니다. 현재는 로컬 SQLite를 운영 원본으로 사용합니다.")
-    st.write(f"자동발송 모드: `{auto_send_settings.mode}`")
-    st.write(f"자동발송 최소 제안서 점수: `{auto_send_settings.min_proposal_score}`")
-    st.write(f"자동발송 PDF 필수 여부: `{auto_send_settings.require_pdf}`")
-    st.write(f"자동발송 최대 건수/실행: `{auto_send_settings.max_items_per_run}`")
-    if auto_send_settings.canary_email:
-        st.write(f"카나리 수신 메일: `{auto_send_settings.canary_email}`")
-    st.divider()
-    st.markdown("### 부서별 예상 소요시간 기준")
-    st.caption("실행 노선도의 ETA 계산에 사용됩니다. 실제 운영 흐름에 맞춰 분 단위로 조정하세요.")
-    with st.form("pipeline_baseline_form"):
-        inputs: dict[str, int] = {}
-        columns = st.columns(2)
-        for index, task_name in enumerate(baseline_task_names):
-            with columns[index % 2]:
-                if task_name == "review_station":
-                    department_label = "검토 운영본부"
-                    task_label = "승인 판단 / 재작업 조정"
-                else:
-                    department_label = DEPARTMENT_CONFIG.get(task_name, {}).get("department", display_task_name(task_name))
-                    task_label = display_task_name(task_name)
-                inputs[task_name] = int(
-                    st.number_input(
-                        f"{department_label} · {task_label}",
-                        min_value=1,
-                        max_value=180,
-                        value=int(pipeline_baselines.get(task_name, DEFAULT_PIPELINE_BASELINES_MINUTES.get(task_name, 5))),
-                        step=1,
-                        key=f"baseline_{task_name}",
-                    )
-                )
-        save_submitted = st.form_submit_button("기준 시간 저장", use_container_width=True)
-    if save_submitted:
-        save_pipeline_baselines(inputs)
-        set_ui_notice("success", "부서별 예상 소요시간 기준을 저장했습니다.")
-        st.rerun()
-    if st.button("기본 기준으로 되돌리기", use_container_width=True):
-        save_pipeline_baselines(DEFAULT_PIPELINE_BASELINES_MINUTES)
-        set_ui_notice("success", "부서별 예상 소요시간 기준을 기본값으로 되돌렸습니다.")
-        st.rerun()
-
-    st.divider()
-    st.markdown("### 최근 실행 로그")
-    log_files = list_recent_runtime_logs(limit=5)
-    if log_files:
-        selected_log = st.selectbox("로그 파일", [f.name for f in log_files], key="settings_recent_log")
-        log_path = next((path for path in log_files if path.name == selected_log), log_files[0])
-        try:
-            content = read_log_tail(log_path, max_chars=4000)
-            st.code(content or "(비어있음)", language="text")
-        except Exception as e:
-            st.warning(f"로그 읽기 실패: {e}")
-    else:
-        if PIPELINE_LOG_DIR.exists():
-            st.info("로그 파일이 없습니다.")
-        else:
-            st.info(f"로그 디렉토리가 없습니다: {PIPELINE_LOG_DIR}")
-
-    st.divider()
-    st.markdown("### 구성현황")
-    st.caption("메인 파이프라인 부서와 지원 조직이 어떤 역할을 맡는지 정리한 표입니다.")
-
-    for task_name in [
-        "lead_research_task",
-        "identity_disambiguation_task",
-        "lead_verification_task",
-        "website_audit_task",
-        "competitor_analysis_task",
-        "landing_page_task",
-        "marketing_recommendation_task",
-        "proposal_task",
-        "proposal_localization_task",
-        "email_outreach_task",
-        "email_localization_task",
-    ]:
-        department = DEPARTMENT_CONFIG.get(task_name, {})
-        members = get_department_members(task_name)
-        support = department.get("support") or []
-        with st.container(border=True):
-            left, right = st.columns([1.4, 1.0])
-            with left:
-                st.markdown(f"**{department.get('department', display_task_name(task_name))}**")
-                st.caption(display_task_name(task_name))
-                st.write(department.get("summary") or "-")
-            with right:
-                st.markdown("**참여 직원**")
-                for member in members:
-                    st.markdown(f"- **{member['name']}** (`{member['crew_label']}`)")
-                    st.caption(f"맡은 역할: {member['role']}")
-                    st.caption(f"한 줄 비전: {member['vision']}")
-                if support:
-                    st.markdown(f"**지원팀**: {', '.join(support)}")
-                else:
-                    st.caption("지원팀 없음")
-
-    st.markdown("### 지원 조직")
-    for team in SUPPORT_TEAM_CONFIG:
-        with st.expander(f"{team['department']} | {team['status']}", expanded=False):
-            for member_name, member_role in team["members"]:
-                st.markdown(f"- **{member_name}**: {member_role}")
 
 
 def main() -> None:
@@ -2747,77 +3158,93 @@ def main() -> None:
     running_run = query_running_run()
     latest_run = list_runs(limit=1)
     latest_run = latest_run[0] if latest_run else None
+    if "dashboard_auto_refresh_enabled" not in st.session_state:
+        st.session_state["dashboard_auto_refresh_enabled"] = bool(running_run)
 
     with st.sidebar:
         st.header("실행 시작")
         with st.container(border=True):
-            target_country = st.selectbox(
-                "대상 국가",
-                COUNTRIES,
-                index=0,
-                format_func=lambda code: f"{COUNTRY_LABELS[code]} ({code})",
-            )
-            country_defaults = COUNTRY_DEFAULTS[target_country]
+            with st.expander("1. 기본 조건", expanded=True):
+                target_country = st.selectbox(
+                    "대상 국가",
+                    COUNTRIES,
+                    index=0,
+                    format_func=lambda code: f"{COUNTRY_LABELS[code]} ({code})",
+                )
+                country_defaults = COUNTRY_DEFAULTS[target_country]
 
-            lead_mode = st.selectbox(
-                "탐색 방식",
-                ["region_or_industry", "company_name"],
-                index=0,
-                format_func=lambda value: LEAD_MODE_LABELS.get(value, value),
-            )
-            lead_query = st.text_area(
-                "탐색 조건",
-                value="",
-                height=100,
-                placeholder=(
-                    "비워두면 자동 모드로 실행됩니다. "
-                    f"예시 기준: `{country_defaults['lead_query']}`"
-                ),
-            )
+                lead_mode = st.selectbox(
+                    "탐색 방식",
+                    ["region_or_industry", "company_name"],
+                    index=0,
+                    format_func=lambda value: LEAD_MODE_LABELS.get(value, value),
+                )
+                lead_query = st.text_area(
+                    "탐색 조건",
+                    value="",
+                    height=100,
+                    placeholder=(
+                        "비워두면 자동 모드로 실행됩니다. "
+                        f"예시 기준: `{country_defaults['lead_query']}`"
+                    ),
+                )
+                max_companies = st.slider("최대 회사 수", min_value=1, max_value=10, value=2)
+
             preview_strategy = build_strategy_snapshot(
                 target_country=target_country,
                 lead_mode=lead_mode,
                 lead_query=lead_query,
             )
+            preview_patterns = preview_strategy.get("selected_patterns", [])
+            preview_pattern_text = ", ".join(pattern.get("pattern_name", "-") for pattern in preview_patterns[:2]) if preview_patterns else "직접 지정 조건"
 
-            max_companies = st.slider("최대 회사 수", min_value=1, max_value=10, value=2)
-            notify_email = st.text_input(
-                "알림 받을 메일",
-                value=os.environ.get("ALERT_EMAIL_TO", ALERT_EMAIL_DEFAULT),
-                key="alert_email_input",
-            )
-            test_mode = st.checkbox("테스트 모드", value=True)
-            st.caption(
-                f"실행 프리뷰: {'자동 모드' if preview_strategy.get('auto_mode') else '수동 모드'} · "
-                f"패턴 {len(preview_strategy.get('selected_patterns', []))}개"
-            )
+            with st.expander("2. 실행 프리뷰 · 시작", expanded=True):
+                preview_segment = "자동 패턴 추천" if preview_strategy.get("auto_mode") else "직접 지정 타깃"
+                with st.container(border=True):
+                    st.markdown(f"**{'자동 모드' if preview_strategy.get('auto_mode') else '수동 모드'}**")
+                    st.caption(f"세그먼트: {preview_segment}")
+                    st.caption(f"탐색 기준: {preview_strategy.get('resolved_query', '-')}")
+                    st.caption(f"대표 패턴: {preview_pattern_text}")
 
-            if running_run:
-                st.warning(
-                    f"실행 중 (4초마다 자동 갱신)\n\n"
-                    f"ID: `{running_run['id'][:8]}` | 현재: {display_task_name(running_run.get('current_task'))}"
+                notify_email = st.text_input(
+                    "알림 받을 메일",
+                    value=os.environ.get("ALERT_EMAIL_TO", ALERT_EMAIL_DEFAULT),
+                    key="alert_email_input",
                 )
+                auto_refresh_enabled = st.checkbox(
+                    "실행 중 자동 갱신",
+                    key="dashboard_auto_refresh_enabled",
+                    help="실행 중일 때만 4초마다 갱신합니다. 검토 화면을 읽을 때는 끄는 편이 안전합니다.",
+                )
+                test_mode = st.checkbox("테스트 모드", value=True)
 
-            if st.button("시작", type="primary", use_container_width=True):
                 if running_run:
-                    st.error("이미 실행 중인 작업이 있습니다. 끝난 뒤 다시 시작해주세요.")
-                elif lead_mode == "company_name" and not lead_query.strip():
-                    st.error("회사명 지정 모드에서는 탐색 조건을 비워둘 수 없습니다. 회사명을 입력해주세요.")
-                else:
-                    launch_background_run(
-                        target_country=target_country,
-                        lead_query=lead_query.strip(),
-                        lead_mode=lead_mode,
-                        max_companies=max_companies,
-                        notify_email=notify_email.strip(),
-                        test_mode=test_mode,
+                    st.warning(
+                        f"현재 {display_task_name(infer_run_focus_task_name(running_run))} 단계가 진행 중입니다. "
+                        "실행 현황 탭이 4초마다 자동 갱신됩니다."
                     )
-                    st.session_state["run_just_launched"] = True
-                    set_ui_notice("success", "실행을 시작했습니다. 실행 현황 탭에서 진행 상태를 확인하세요.")
-                    st.rerun()
 
-            if st.button("새로고침", use_container_width=True):
-                st.rerun()
+                if st.button("시작", type="primary", use_container_width=True):
+                    if running_run:
+                        st.error("이미 실행 중인 작업이 있습니다. 끝난 뒤 다시 시작해주세요.")
+                    elif lead_mode == "company_name" and not lead_query.strip():
+                        st.error("회사명 지정 모드에서는 탐색 조건을 비워둘 수 없습니다. 회사명을 입력해주세요.")
+                    else:
+                        launch_background_run(
+                            target_country=target_country,
+                            lead_query=lead_query.strip(),
+                            lead_mode=lead_mode,
+                            max_companies=max_companies,
+                            notify_email=notify_email.strip(),
+                            test_mode=test_mode,
+                        )
+                        st.session_state["dashboard_auto_refresh_enabled"] = True
+                        st.session_state["run_just_launched"] = True
+                        set_ui_notice("success", "실행을 시작했습니다. 실행 현황 탭에서 진행 상태를 확인하세요.")
+                        st.rerun()
+
+                if st.button("새로고침", use_container_width=True):
+                    st.rerun()
 
     top_left, top_right = st.columns([5.2, 1.2])
     with top_right:
@@ -2863,7 +3290,7 @@ def main() -> None:
                             "작업": display_task_name(row["task_name"]),
                             "담당": (
                                 f"{get_department_members(row.get('task_name'))[0]['name']} "
-                                f"({get_department_members(row.get('task_name'))[0]['crew_label']})"
+                                f"({display_task_name(get_department_members(row.get('task_name'))[0]['crew_label'])})"
                                 if get_department_members(row.get("task_name"))
                                 else "-"
                             ),
@@ -2884,8 +3311,24 @@ def main() -> None:
         render_approval_queue(st.session_state.get("alert_email_input", ALERT_EMAIL_DEFAULT))
 
     with tabs[4]:
-        selected_run = render_runs("assets_tab")
-        render_assets(selected_run or latest_run)
+        st.subheader("산출물")
+        overview_assets = list_assets(latest_run["id"]) if latest_run else []
+        overview_summary = summarize_asset_rows(overview_assets)
+        overview_cols = st.columns(4)
+        overview_cols[0].metric("최근 생성 산출물", str(overview_summary["today_count"]))
+        overview_cols[1].metric("전체 산출물", str(overview_summary["asset_count"]))
+        overview_cols[2].metric("제안서 원본", str(overview_summary["proposal_count"]))
+        overview_cols[3].metric("PDF 완료", str(overview_summary["pdf_count"]))
+        if latest_run:
+            st.caption(f"최근 실행 기준: {get_run_segment_label(latest_run)} | {display_country(latest_run.get('target_country'))}")
+        else:
+            st.caption("아직 실행 이력이 없어 최근 산출물 요약은 0건으로 표시됩니다.")
+
+        render_assets(latest_run, show_subheader=False, show_summary=False)
+        with st.expander("다른 실행 산출물 보기", expanded=False):
+            selected_run = render_runs("assets_tab")
+            if selected_run and (not latest_run or selected_run.get("id") != latest_run.get("id")):
+                render_assets(selected_run, show_subheader=False, show_summary=False)
 
     with tabs[5]:
         render_notifications()
@@ -2893,11 +3336,13 @@ def main() -> None:
     with tabs[6]:
         render_settings()
 
-    if running_run:
-        time.sleep(4)
-        st.rerun()
-    elif latest_run and latest_run.get("status") in {"waiting_approval"}:
-        time.sleep(8)
+    refresh_interval = get_auto_refresh_interval_seconds(
+        running_run=running_run,
+        latest_run=latest_run,
+        enabled=bool(st.session_state.get("dashboard_auto_refresh_enabled", False)),
+    )
+    if refresh_interval:
+        time.sleep(refresh_interval)
         st.rerun()
 
 
