@@ -57,6 +57,43 @@ class RuntimeNotificationsTests(unittest.TestCase):
         self.assertEqual(payload[0].get_content_type(), "multipart/alternative")
         self.assertEqual(payload[1].get_filename(), "proposal.pdf")
 
+    def test_send_email_message_embeds_inline_images_as_related_parts(self) -> None:
+        smtp = DummySMTP()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logo_path = Path(temp_dir) / "logo.png"
+            signature_path = Path(temp_dir) / "signature.png"
+            logo_path.write_bytes(
+                bytes.fromhex(
+                    "89504E470D0A1A0A0000000D49484452000000010000000108060000001F15C4890000000D49444154789C6360000002000154A24F5D0000000049454E44AE426082"
+                )
+            )
+            signature_path.write_bytes(
+                bytes.fromhex(
+                    "89504E470D0A1A0A0000000D49484452000000010000000108060000001F15C4890000000D49444154789C6360000002000154A24F5D0000000049454E44AE426082"
+                )
+            )
+
+            with patch("sales_factory.runtime_notifications.build_smtp", return_value=smtp), patch.dict(
+                "os.environ",
+                {"SMTP_USER": "ops@onecation.co.kr"},
+                clear=False,
+            ):
+                send_email_message(
+                    subject="Test subject",
+                    body_text="Plain body",
+                    body_html='<p><img src="cid:logo"></p><p><img src="cid:signature"></p>',
+                    to_email="client@example.com",
+                    inline_image_paths={"logo": logo_path, "signature": signature_path},
+                )
+
+        parsed = message_from_string(smtp.sent_messages[0][2])
+        payload = parsed.get_payload()
+        self.assertEqual(payload[0].get_content_type(), "multipart/related")
+        related_parts = payload[0].get_payload()
+        self.assertEqual(related_parts[0].get_content_type(), "multipart/alternative")
+        content_ids = {part.get("Content-ID") for part in related_parts[1:]}
+        self.assertEqual(content_ids, {"<logo>", "<signature>"})
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -33,6 +33,7 @@ import argparse
 import csv
 import io
 import json
+import mimetypes
 import os
 import re
 import smtplib
@@ -40,6 +41,7 @@ import sys
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from email.mime.application import MIMEApplication
+from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
@@ -78,6 +80,11 @@ KOREAN_SENDER_NAME = "염정원"
 KOREAN_FIXED_INTRO = f"안녕하세요, {KOREAN_COMPANY_NAME} {KOREAN_SENDER_NAME}입니다."
 KOREAN_SUBJECT_PREFIX = f"[{KOREAN_COMPANY_NAME}]"
 HANGUL_RE = re.compile(r"[\uac00-\ud7af]")
+BRAND_WEBSITE_URL = "https://onecation.co.kr/"
+EMAIL_BRANDING_DIR = BASE_DIR / "src" / "sales_factory" / "assets" / "email_branding"
+EMAIL_BRANDING_LOGO = EMAIL_BRANDING_DIR / "logo.png"
+EMAIL_BRANDING_KR = EMAIL_BRANDING_DIR / "kr.png"
+EMAIL_BRANDING_EN = EMAIL_BRANDING_DIR / "en.png"
 
 TOUCH_DAYS = {"D1": 1, "D3": 3, "D6": 6, "D10": 10}
 
@@ -333,6 +340,35 @@ def _normalize_body_intro(body: str) -> str:
     return f"{KOREAN_FIXED_INTRO}\n\n{remainder}"
 
 
+def _get_branding_inline_image_paths(language: str) -> dict[str, Path]:
+    signature_path = EMAIL_BRANDING_KR if language == "ko" else EMAIL_BRANDING_EN
+    inline_images: dict[str, Path] = {}
+    if EMAIL_BRANDING_LOGO.exists():
+        inline_images["onecation-logo"] = EMAIL_BRANDING_LOGO
+    if signature_path.exists():
+        inline_images["onecation-signature"] = signature_path
+    return inline_images
+
+
+def _render_brand_logo_html() -> str:
+    return (
+        f'<a href="{BRAND_WEBSITE_URL}" style="text-decoration:none;display:block;">'
+        '<img src="cid:onecation-logo" alt="Onecation logo" '
+        'style="display:block;width:100%;max-width:820px;height:auto;border:0;border-radius:18px;">'
+        "</a>"
+    )
+
+
+def _render_brand_signature_html(language: str) -> str:
+    alt = "Onecation Korean signature banner" if language == "ko" else "Onecation English signature banner"
+    return (
+        f'<a href="{BRAND_WEBSITE_URL}" style="text-decoration:none;display:block;">'
+        f'<img src="cid:onecation-signature" alt="{alt}" '
+        'style="display:block;width:100%;max-width:850px;height:auto;border:0;border-radius:18px;">'
+        "</a>"
+    )
+
+
 def render_html(touch: Touchpoint, company_name: str, has_pdf: bool, recipient_name: str = "") -> str:
     body_text = _normalize_body_intro(_body_with_name(touch.body or "", recipient_name))
     body_html = _md_to_html(body_text) if body_text else ""
@@ -423,6 +459,51 @@ def render_html(touch: Touchpoint, company_name: str, has_pdf: bool, recipient_n
 </html>"""
 
 
+def render_branded_html(touch: Touchpoint, company_name: str, has_pdf: bool, recipient_name: str = "") -> str:
+    body_text = _normalize_body_intro(_body_with_name(touch.body or "", recipient_name))
+    body_html = _md_to_html(body_text) if body_text else ""
+    language = _detect_email_language(body_text)
+    cta_text = touch.cta or f"?곕씫 二쇱떆硫?諛붾줈 ?덈궡?쒕━寃좎뒿?덈떎 ??{BRAND['phone']} / {BRAND['email']}"
+    pdf_note = (
+        f'<p style="color:#0B7285;font-size:13px;margin:0 0 8px;">'
+        f'?뱨 <strong>{company_name}</strong> 留욎땄 ?쒖븞?쒕? 泥⑤??덉뒿?덈떎. '
+        f'1???λ쭔 蹂댁뀛???듭떖???뚯븙?섏떎 ???덇쾶 援ъ꽦???먯뿀?듬땲??</p>'
+    ) if has_pdf else ""
+
+    return f"""<!DOCTYPE html>
+<html lang="{language if language == 'ko' else 'en'}">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#F3F5F9;font-family:'Malgun Gothic','Apple SD Gothic Neo','Segoe UI',Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#F3F5F9;padding:28px 12px;">
+    <tr><td align="center">
+      <table width="680" cellpadding="0" cellspacing="0" style="width:100%;max-width:680px;">
+        <tr>
+          <td style="padding-bottom:14px;">
+            {_render_brand_logo_html()}
+          </td>
+        </tr>
+        <tr>
+          <td style="background:#ffffff;border:1px solid #E2E8F0;border-radius:18px;padding:34px 34px 28px;box-shadow:0 10px 30px rgba(15,23,42,0.08);">
+            <div style="font-size:15px;color:#1D2433;line-height:1.8;">{body_html}</div>
+            {pdf_note}
+            <div style="margin-top:18px;background:#F7F9FC;border-left:4px solid #0B7285;padding:14px 18px;border-radius:0 6px 6px 0;">
+              <span style="font-size:12px;color:#64748B;">?ㅼ쓬 ?④퀎</span><br>
+              <span style="font-size:14px;color:#0D1B2A;font-weight:bold;">{cta_text}</span>
+            </div>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding-top:16px;">
+            {_render_brand_signature_html(language)}
+          </td>
+        </tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>"""
+
+
 def render_plain(touch: Touchpoint, company_name: str, recipient_name: str = "") -> str:
     """HTML 미지원 클라이언트용 plain text. [Contact Name]은 recipient_name으로 치환."""
     body = _normalize_body_intro(_body_with_name(touch.body or "", recipient_name))
@@ -490,7 +571,7 @@ def build_smtp() -> smtplib.SMTP:
     return smtp
 
 
-def send_one(
+def _legacy_send_one(
     smtp: smtplib.SMTP,
     to_email: str,
     touch: Touchpoint,
@@ -506,7 +587,7 @@ def send_one(
         subject_body,
     )
 
-    msg = MIMEMultipart("alternative")
+    plain_body = render_plain(touch, company_name, recipient_name)
     msg["From"]    = f"{BRAND['name']} <{from_addr}>"
     msg["To"]      = to_email
     msg["Subject"] = subject
@@ -537,6 +618,69 @@ def send_one(
 # ═══════════════════════════════════════════════════════════════════════════════
 # 미리보기 출력
 # ═══════════════════════════════════════════════════════════════════════════════
+
+def send_one(
+    smtp: smtplib.SMTP,
+    to_email: str,
+    touch: Touchpoint,
+    company_name: str,
+    pdf_path: Path | None,
+    recipient_name: str = "",
+) -> bool:
+    """Branded email send path with inline logo/signature images."""
+    from_addr = os.environ.get("SMTP_USER", BRAND["email"])
+    subject_body = _body_with_name(touch.body or "", recipient_name)
+    subject = _normalize_subject(
+        touch.subject or f"[{company_name}] 留욎땄 留덉????쒖븞 ??{touch.tag}",
+        subject_body,
+    )
+
+    has_pdf = pdf_path is not None and pdf_path.exists()
+    plain_body = render_plain(touch, company_name, recipient_name)
+    language = _detect_email_language(subject_body or plain_body)
+    inline_image_paths = {
+        cid: path
+        for cid, path in _get_branding_inline_image_paths(language).items()
+        if path.exists() and path.is_file()
+    }
+
+    message = MIMEMultipart("mixed") if has_pdf and touch.tag == "D1" else MIMEMultipart("related" if inline_image_paths else "alternative")
+    message["From"] = f"{BRAND['name']} <{from_addr}>"
+    message["To"] = to_email
+    message["Subject"] = subject
+
+    body_container: MIMEMultipart = MIMEMultipart("related") if (has_pdf and touch.tag == "D1" and inline_image_paths) else message
+    if body_container is not message:
+        message.attach(body_container)
+
+    alternative = MIMEMultipart("alternative")
+    alternative.attach(MIMEText(plain_body, "plain", "utf-8"))
+    alternative.attach(MIMEText(render_branded_html(touch, company_name, has_pdf, recipient_name), "html", "utf-8"))
+    body_container.attach(alternative)
+
+    for cid, image_path in inline_image_paths.items():
+        mime_type, _ = mimetypes.guess_type(str(image_path))
+        subtype = "png"
+        if mime_type and "/" in mime_type:
+            subtype = mime_type.split("/", 1)[1]
+        image_part = MIMEImage(image_path.read_bytes(), _subtype=subtype)
+        image_part.add_header("Content-ID", f"<{cid}>")
+        image_part.add_header("Content-Disposition", "inline", filename=image_path.name)
+        body_container.attach(image_part)
+
+    if has_pdf and touch.tag == "D1":
+        with open(pdf_path, "rb") as f:
+            att = MIMEApplication(f.read(), _subtype="pdf")
+            att.add_header(
+                "Content-Disposition",
+                "attachment",
+                filename=pdf_path.name.encode("utf-8").decode("ascii", errors="replace"),
+            )
+            message.attach(att)
+
+    smtp.sendmail(from_addr, to_email, message.as_string())
+    return True
+
 
 def print_preview(
     company: str,

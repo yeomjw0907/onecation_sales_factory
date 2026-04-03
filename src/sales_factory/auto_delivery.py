@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import os
 import re
 from dataclasses import asdict, dataclass
@@ -20,6 +21,11 @@ KOREAN_COMPANY_NAME = "주식회사 98점7도"
 KOREAN_SENDER_NAME = "염정원"
 KOREAN_FIXED_INTRO = f"안녕하세요, {KOREAN_COMPANY_NAME} {KOREAN_SENDER_NAME}입니다."
 KOREAN_SUBJECT_PREFIX = f"[{KOREAN_COMPANY_NAME}]"
+BRAND_WEBSITE_URL = "https://onecation.co.kr/"
+EMAIL_BRANDING_DIR = Path(__file__).resolve().parent / "assets" / "email_branding"
+EMAIL_BRANDING_LOGO = EMAIL_BRANDING_DIR / "logo.png"
+EMAIL_BRANDING_KR = EMAIL_BRANDING_DIR / "kr.png"
+EMAIL_BRANDING_EN = EMAIL_BRANDING_DIR / "en.png"
 TITLE_ONLY_IDENTITIES = {
     "대표",
     "대표이사",
@@ -568,6 +574,75 @@ def compose_primary_email_body(body: str, *, cta: str, offer_summary: str) -> st
     return "\n\n".join(part for part in chunks if part and part.strip())
 
 
+def markdown_body_to_email_html(body: str) -> str:
+    paragraphs = [chunk.strip() for chunk in re.split(r"\n\s*\n", body.strip()) if chunk.strip()]
+    html_parts: list[str] = []
+    for paragraph in paragraphs:
+        escaped = html.escape(paragraph).replace("\n", "<br>")
+        escaped = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", escaped)
+        html_parts.append(
+            "<p style=\"margin:0 0 18px;font-size:15px;line-height:1.8;color:#1d2433;\">"
+            f"{escaped}</p>"
+        )
+    return "".join(html_parts)
+
+
+def get_branding_inline_image_paths(language: str) -> dict[str, Path]:
+    signature_path = EMAIL_BRANDING_KR if language == "ko" else EMAIL_BRANDING_EN
+    inline_images: dict[str, Path] = {}
+    if EMAIL_BRANDING_LOGO.exists():
+        inline_images["onecation-logo"] = EMAIL_BRANDING_LOGO
+    if signature_path.exists():
+        inline_images["onecation-signature"] = signature_path
+    return inline_images
+
+
+def render_brand_logo_html() -> str:
+    return (
+        f"<a href=\"{BRAND_WEBSITE_URL}\" style=\"text-decoration:none;display:block;\">"
+        "<img src=\"cid:onecation-logo\" alt=\"Onecation logo\" "
+        "style=\"display:block;width:100%;max-width:820px;height:auto;border:0;border-radius:18px;\">"
+        "</a>"
+    )
+
+
+def render_brand_signature_html(language: str) -> str:
+    alt = "Onecation Korean signature banner" if language == "ko" else "Onecation English signature banner"
+    return (
+        f"<a href=\"{BRAND_WEBSITE_URL}\" style=\"text-decoration:none;display:block;\">"
+        f"<img src=\"cid:onecation-signature\" alt=\"{html.escape(alt)}\" "
+        "style=\"display:block;width:100%;max-width:850px;height:auto;border:0;border-radius:18px;\">"
+        "</a>"
+    )
+
+
+def render_primary_email_html(body: str, language: str | None = None) -> str:
+    language = language or detect_email_language(body)
+    return (
+        "<!DOCTYPE html>"
+        "<html lang=\"{}\">"
+        "<head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"></head>"
+        "<body style=\"margin:0;padding:0;background:#f3f5f9;font-family:'Malgun Gothic','Apple SD Gothic Neo','Segoe UI',Arial,sans-serif;\">"
+        "<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" style=\"background:#f3f5f9;padding:28px 12px;\">"
+        "<tr><td align=\"center\">"
+        "<table role=\"presentation\" width=\"680\" cellpadding=\"0\" cellspacing=\"0\" style=\"width:100%;max-width:680px;\">"
+        "<tr><td style=\"padding-bottom:14px;\">{}</td></tr>"
+        "<tr><td style=\"background:#ffffff;border:1px solid #e2e8f0;border-radius:18px;padding:34px 34px 28px;box-shadow:0 10px 30px rgba(15,23,42,0.08);\">"
+        "{}"
+        "</td></tr>"
+        "<tr><td style=\"padding-top:16px;\">{}</td></tr>"
+        "</table>"
+        "</td></tr>"
+        "</table>"
+        "</body></html>"
+    ).format(
+        html.escape(language),
+        render_brand_logo_html(),
+        markdown_body_to_email_html(body),
+        render_brand_signature_html(language),
+    )
+
+
 def collect_primary_attachments(asset_rows: list[dict[str, Any]]) -> list[Path]:
     attachments: list[Path] = []
     candidate_found = False
@@ -611,6 +686,9 @@ def execute_auto_send(
     settings: AutoSendSettings,
 ) -> dict[str, Any]:
     subject, body, attachments = build_primary_email_payload(asset_rows)
+    language = detect_email_language(body)
+    body_html = render_primary_email_html(body, language=language)
+    inline_image_paths = get_branding_inline_image_paths(language)
     if settings.mode == "shadow":
         return {
             "mode": settings.mode,
@@ -633,8 +711,10 @@ def execute_auto_send(
         send_email_message(
             subject=canary_subject,
             body_text=canary_body,
+            body_html=render_primary_email_html(canary_body, language=language),
             to_email=settings.canary_email,
             attachment_paths=attachments,
+            inline_image_paths=inline_image_paths,
         )
         return {
             "mode": settings.mode,
@@ -649,8 +729,10 @@ def execute_auto_send(
         send_email_message(
             subject=subject,
             body_text=body,
+            body_html=body_html,
             to_email=assessment.recipient_email,
             attachment_paths=attachments,
+            inline_image_paths=inline_image_paths,
         )
         return {
             "mode": settings.mode,

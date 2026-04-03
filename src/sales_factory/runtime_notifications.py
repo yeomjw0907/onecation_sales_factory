@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import mimetypes
 import os
 import smtplib
 import urllib.request
 from email.mime.application import MIMEApplication
+from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
@@ -49,6 +51,7 @@ def send_email_message(
     body_html: str | None = None,
     to_email: str,
     attachment_paths: list[Path] | None = None,
+    inline_image_paths: dict[str, Path] | None = None,
 ) -> None:
     load_env_file()
     from_email = os.environ.get("SMTP_USER", "").strip()
@@ -60,11 +63,30 @@ def send_email_message(
     message["To"] = to_email
     message["Subject"] = subject
 
+    inline_images = {
+        cid: path
+        for cid, path in (inline_image_paths or {}).items()
+        if path.exists() and path.is_file()
+    }
+    body_container: MIMEMultipart = MIMEMultipart("related") if body_html and inline_images else message
+    if body_container is not message:
+        message.attach(body_container)
+
     alternative = MIMEMultipart("alternative")
     alternative.attach(MIMEText(body_text, "plain", "utf-8"))
     if body_html:
         alternative.attach(MIMEText(body_html, "html", "utf-8"))
-    message.attach(alternative)
+    body_container.attach(alternative)
+
+    for cid, image_path in inline_images.items():
+        mime_type, _ = mimetypes.guess_type(str(image_path))
+        subtype = "png"
+        if mime_type and "/" in mime_type:
+            subtype = mime_type.split("/", 1)[1]
+        image_part = MIMEImage(image_path.read_bytes(), _subtype=subtype)
+        image_part.add_header("Content-ID", f"<{cid}>")
+        image_part.add_header("Content-Disposition", "inline", filename=image_path.name)
+        body_container.attach(image_part)
 
     for attachment_path in attachment_paths or []:
         if not attachment_path.exists() or not attachment_path.is_file():
@@ -111,10 +133,12 @@ def send_alert_email(
     body_text: str,
     body_html: str | None = None,
     to_email: str,
+    inline_image_paths: dict[str, Path] | None = None,
 ) -> None:
     send_email_message(
         subject=subject,
         body_text=body_text,
         body_html=body_html,
         to_email=to_email,
+        inline_image_paths=inline_image_paths,
     )

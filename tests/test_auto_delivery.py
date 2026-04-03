@@ -18,6 +18,7 @@ from sales_factory.auto_delivery import (
     execute_auto_send,
     get_auto_send_settings,
     load_verified_recipients,
+    render_primary_email_html,
 )
 
 
@@ -230,6 +231,61 @@ class AutoDeliveryTests(unittest.TestCase):
             self.assertEqual(result["status"], "sent")
             self.assertEqual(result["recipient"], "ops@example.com")
             mocked_send.assert_called_once()
+
+    def test_execute_auto_send_live_passes_branded_html_body(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            email_path = temp_path / "outreach_emails.md"
+            email_path.write_text(
+                "# 서울대학교\n"
+                "## Primary Outbound Email\n"
+                "- subject: 서울대학교 글로벌 디지털 브랜드 위상 강화 제안\n"
+                "- preview_line: Preview\n"
+                "- body:\n"
+                "    안녕하세요, Onecation의 대표입니다.\n"
+                "    \n"
+                "    서울대학교의 글로벌 연구 서사를 더 선명하게 보여줄 기회가 있습니다.\n"
+                "- cta: 다음 주 30분 정도 논의 가능하실까요?\n",
+                encoding="utf-8",
+            )
+            pdf_path = temp_path / "proposal.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4")
+
+            assessment = type(
+                "Assessment",
+                (),
+                {
+                    "recipient_email": "team@snu.ac.kr",
+                    "company_name": "서울대학교",
+                    "proposal_score": 96,
+                },
+            )()
+
+            with patch("sales_factory.auto_delivery.send_email_message") as mocked_send:
+                result = execute_auto_send(
+                    asset_rows=[
+                        {"asset_type": "email_sequence", "path": str(email_path), "metadata_json": {}},
+                        {"asset_type": "proposal_pdf", "path": str(pdf_path), "metadata_json": {}},
+                    ],
+                    assessment=assessment,  # type: ignore[arg-type]
+                    settings=AutoSendSettings(mode="live", canary_email="", min_proposal_score=85, require_pdf=True, max_items_per_run=3),
+                )
+
+            self.assertEqual(result["status"], "sent")
+            mocked_send.assert_called_once()
+            kwargs = mocked_send.call_args.kwargs
+            self.assertIn("cid:onecation-logo", kwargs["body_html"])
+            self.assertIn("cid:onecation-signature", kwargs["body_html"])
+            self.assertEqual(sorted(kwargs["inline_image_paths"].keys()), ["onecation-logo", "onecation-signature"])
+
+    def test_render_primary_email_html_switches_banner_by_language(self) -> None:
+        korean_html = render_primary_email_html("안녕하세요, 주식회사 98점7도 염정원입니다.\n\n서울대학교 제안 메일입니다.")
+        english_html = render_primary_email_html("Hello, this is Yeom Jungwon from 98.7 Co., Ltd.\n\nThis is a proposal email.")
+
+        self.assertIn("cid:onecation-logo", korean_html)
+        self.assertIn("cid:onecation-signature", korean_html)
+        self.assertIn("cid:onecation-logo", english_html)
+        self.assertIn("cid:onecation-signature", english_html)
 
     def test_build_primary_email_payload_adds_offer_cta_signature_and_pdf_attachment(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

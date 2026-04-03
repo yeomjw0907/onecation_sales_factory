@@ -26,7 +26,13 @@ except ImportError:
     sys.exit(1)
 
 from sales_factory.proposal_quality import evaluate_proposal_path, evaluate_proposal_text
-from sales_factory.auto_delivery import build_primary_email_payload, get_auto_send_settings
+from sales_factory.auto_delivery import (
+    build_primary_email_payload,
+    detect_email_language,
+    get_auto_send_settings,
+    get_branding_inline_image_paths,
+    render_primary_email_html,
+)
 from sales_factory.runtime_assets import route_rejection
 from sales_factory.runtime_copilot import answer_ops_question
 from sales_factory.segment_calendar import (
@@ -200,6 +206,7 @@ AUTO_SEND_MODE_LABELS = {
 
 OUTBOUND_NOTIFICATION_KIND_LABELS = {
     "auto_delivery": "자동 발송",
+    "manual_outbound_email": "수동 실발송",
     "test_outbound_email": "테스트 발송",
 }
 
@@ -2164,12 +2171,15 @@ def send_test_outbound_email(
     recipient: str,
 ) -> None:
     subject, body, attachments = build_primary_email_payload(asset_rows)
+    language = detect_email_language(body)
 
     send_email_message(
         subject=f"[TEST] {subject}",
         body_text=body,
+        body_html=render_primary_email_html(body, language=language),
         to_email=recipient,
         attachment_paths=attachments,
+        inline_image_paths=get_branding_inline_image_paths(language),
     )
     record_notification(
         run_id,
