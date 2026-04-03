@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 SRC_DIR = ROOT_DIR / "src"
@@ -61,6 +61,44 @@ class SlackReviewTests(unittest.TestCase):
         self.assertIn("approval_approve", action_ids)
         self.assertIn("approval_request_changes", action_ids)
         self.assertIn("approval_send_test", action_ids)
+
+    def test_try_add_message_reaction_uses_channel_and_message_ts(self) -> None:
+        client = Mock()
+
+        slack_review._try_add_message_reaction(
+            client,
+            channel_id="C123",
+            message_ts="1712345678.000100",
+            name="white_check_mark",
+        )
+
+        client.reactions_add.assert_called_once_with(
+            channel="C123",
+            timestamp="1712345678.000100",
+            name="white_check_mark",
+        )
+
+    @patch("sales_factory.slack_review.reject_approval_item", return_value=(True, "재작업을 다시 시작했습니다."))
+    def test_handle_request_changes_async_posts_feedback_and_reaction(self, mock_reject_approval_item) -> None:
+        client = Mock()
+
+        slack_review._handle_request_changes_async(
+            client,
+            item={"id": "item-1", "title": "Acme outbound"},
+            reason="이메일을 더 공손하게 작성해줘",
+            reviewer_identity="tester",
+            channel_id="C123",
+            user_id="U123",
+            message_ts="1712345678.000100",
+        )
+
+        mock_reject_approval_item.assert_called_once()
+        client.reactions_add.assert_called_once_with(
+            channel="C123",
+            timestamp="1712345678.000100",
+            name="memo",
+        )
+        client.chat_postEphemeral.assert_called_once()
 
     @patch("sales_factory.slack_review.build_primary_email_payload")
     @patch("sales_factory.slack_review.load_approval_assets")

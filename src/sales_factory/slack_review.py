@@ -224,6 +224,58 @@ def _notify_channel_or_dm(client: Any, *, channel_id: str | None, user_id: str |
             client.chat_postMessage(channel=dm_channel, text=text)
 
 
+def _try_add_message_reaction(
+    client: Any,
+    *,
+    channel_id: str | None,
+    message_ts: str | None,
+    name: str,
+) -> None:
+    if not channel_id or not message_ts:
+        return
+    try:
+        client.reactions_add(channel=channel_id, timestamp=message_ts, name=name)
+    except Exception:
+        return
+
+
+def _handle_request_changes_async(
+    client: Any,
+    *,
+    item: dict[str, Any],
+    reason: str,
+    reviewer_identity: str,
+    channel_id: str | None,
+    user_id: str | None,
+    message_ts: str | None,
+) -> None:
+    try:
+        launched, message = reject_approval_item(
+            item,
+            reason,
+            reviewer_identity=reviewer_identity,
+        )
+        _try_add_message_reaction(
+            client,
+            channel_id=channel_id,
+            message_ts=message_ts,
+            name="memo",
+        )
+        _post_ephemeral(
+            client,
+            channel_id=channel_id,
+            user_id=user_id,
+            text=message if launched else f"보완 요청은 기록했지만 재작업 시작은 보류됐습니다. {message}",
+        )
+    except Exception as exc:
+        _post_ephemeral(
+            client,
+            channel_id=channel_id,
+            user_id=user_id,
+            text=f"보완 요청 처리 중 오류가 발생했습니다: {exc}",
+        )
+
+
 def _build_preview_modal(item: dict[str, Any]) -> dict[str, Any]:
     asset_rows = load_approval_assets(item)
     proposal_preview = asset_preview_text(asset_rows, "proposal", limit=1400)
@@ -489,6 +541,12 @@ def ensure_slack_socket_mode_started() -> bool:
                 )
                 return
             approve_approval_item(item, reviewer_identity=body.get("user", {}).get("username") or body.get("user", {}).get("id", ""))
+            _try_add_message_reaction(
+                client,
+                channel_id=body.get("channel", {}).get("id"),
+                message_ts=body.get("message", {}).get("ts"),
+                name="white_check_mark",
+            )
             _notify_action_result(
                 client,
                 body,
@@ -522,6 +580,12 @@ def ensure_slack_socket_mode_started() -> bool:
                 company_name=item.get("company_name") or "",
                 asset_rows=asset_rows,
                 recipient=recipient,
+            )
+            _try_add_message_reaction(
+                client,
+                channel_id=body.get("channel", {}).get("id"),
+                message_ts=body.get("message", {}).get("ts"),
+                name="email",
             )
             _post_ephemeral(
                 client,
@@ -601,6 +665,7 @@ def ensure_slack_socket_mode_started() -> bool:
                     "item_id": item_id,
                     "channel_id": body.get("channel", {}).get("id"),
                     "user_id": body.get("user", {}).get("id"),
+                    "message_ts": body.get("message", {}).get("ts"),
                 }
             )
             open_modal = client.views_push if body.get("view", {}).get("id") else client.views_open
@@ -651,17 +716,20 @@ def ensure_slack_socket_mode_started() -> bool:
                 )
                 return
 
-            launched, message = reject_approval_item(
-                item,
-                reason,
-                reviewer_identity=body.get("user", {}).get("username") or body.get("user", {}).get("id", ""),
-            )
-            _post_ephemeral(
-                client,
-                channel_id=metadata.get("channel_id"),
-                user_id=metadata.get("user_id"),
-                text=message if launched else f"보완 요청은 기록했지만 재작업 시작은 보류됐습니다. {message}",
-            )
+            threading.Thread(
+                target=_handle_request_changes_async,
+                kwargs={
+                    "client": client,
+                    "item": item,
+                    "reason": reason,
+                    "reviewer_identity": body.get("user", {}).get("username") or body.get("user", {}).get("id", ""),
+                    "channel_id": metadata.get("channel_id"),
+                    "user_id": metadata.get("user_id"),
+                    "message_ts": metadata.get("message_ts"),
+                },
+                name=f"slack-request-changes-{item['id'][:8]}",
+                daemon=True,
+            ).start()
 
         def _start() -> None:
             global _SOCKET_MODE_STARTED, _SOCKET_MODE_THREAD
