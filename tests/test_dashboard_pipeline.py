@@ -291,6 +291,24 @@ class DashboardPipelineTests(unittest.TestCase):
         self.assertEqual(rows[0]["test"], 1)
         self.assertEqual(rows[1]["blocked"], 1)
 
+    def test_resolve_segment_execution_inputs_uses_preset_defaults(self) -> None:
+        resolved = web_dashboard.resolve_segment_execution_inputs("portfolio-institution-program")
+
+        self.assertEqual(resolved["segment_id"], "portfolio-institution-program")
+        self.assertEqual(resolved["target_country"], "KR")
+        self.assertEqual(resolved["lead_mode"], "region_or_industry")
+        self.assertEqual(resolved["default_max_companies"], 6)
+        self.assertTrue(resolved["lead_query"])
+        self.assertIn("Program Manager", resolved["target_roles"])
+
+    def test_resolve_segment_execution_inputs_falls_back_when_country_is_not_recommended(self) -> None:
+        fallback = web_dashboard.resolve_segment_execution_inputs("korea-entry-overseas", "KR")
+        specific = web_dashboard.resolve_segment_execution_inputs("korea-entry-overseas", "CN")
+
+        self.assertEqual(fallback["target_country"], "US")
+        self.assertEqual(specific["target_country"], "CN")
+        self.assertIn("Chinese companies", specific["lead_query"])
+
 
 class DashboardIssueActionTests(unittest.TestCase):
     def test_llm_issue_includes_retry_kind(self) -> None:

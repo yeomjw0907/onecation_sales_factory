@@ -31,6 +31,8 @@ from sales_factory.runtime_assets import route_rejection
 from sales_factory.runtime_copilot import answer_ops_question
 from sales_factory.segment_calendar import (
     add_segment_calendar_entry,
+    build_segment_brief,
+    build_segment_query,
     create_segment_calendar_entry,
     delete_segment_calendar_entry,
     get_segment_preset,
@@ -1364,6 +1366,38 @@ def launch_background_run(
             stderr=log_file,
             close_fds=True,
         )
+
+
+def resolve_segment_execution_inputs(segment_id: str, target_country: str | None = None) -> dict[str, Any]:
+    preset = get_segment_preset(segment_id)
+    if not preset:
+        raise ValueError(f"Unknown segment preset: {segment_id}")
+
+    raw_countries = preset.get("recommended_countries") or COUNTRIES
+    recommended_countries = [str(code) for code in raw_countries if str(code) in COUNTRY_DEFAULTS]
+    if not recommended_countries:
+        recommended_countries = [code for code in COUNTRIES if code in COUNTRY_DEFAULTS]
+
+    fallback_country = str(preset.get("default_country") or recommended_countries[0] or COUNTRIES[0])
+    resolved_country = str(target_country or fallback_country)
+    if resolved_country not in recommended_countries:
+        resolved_country = fallback_country
+
+    default_max_companies = int(preset.get("default_max_companies") or 10)
+    return {
+        "segment_id": str(preset["id"]),
+        "segment_label": str(preset["label"]),
+        "segment_brief": build_segment_brief(segment_id, resolved_country),
+        "description": str(preset.get("description") or ""),
+        "offer": str(preset.get("offer") or ""),
+        "target_roles": list(preset.get("target_roles") or []),
+        "portfolio": list(preset.get("portfolio") or []),
+        "recommended_countries": recommended_countries,
+        "target_country": resolved_country,
+        "lead_mode": "region_or_industry",
+        "lead_query": build_segment_query(segment_id, resolved_country),
+        "default_max_companies": default_max_companies,
+    }
 
 
 def finalize_run_review_state(run_id: str) -> None:
@@ -4979,6 +5013,301 @@ def render_notifications() -> None:
             )
 
 
+def render_strategy_tab_v2(
+    *,
+    preview_strategy: dict[str, Any],
+    selected_country: str,
+    latest_run: dict[str, Any] | None,
+    preview_mode: str,
+    preview_segment_label: str,
+) -> None:
+    st.subheader("오늘의 전략")
+    today_value = date.today()
+    selected_patterns = preview_strategy.get("selected_patterns", [])
+    latest_inputs = parse_json_field(latest_run.get("inputs_json"), {}) if latest_run else {}
+    current_segment = (
+        latest_inputs.get("segment_label")
+        or preview_segment_label
+        or ("자동 패턴 추천" if preview_strategy.get("auto_mode") else "수동 타깃팅")
+    )
+    if preview_mode == "segment_preset":
+        execution_mode = "세그먼트 프리셋"
+    else:
+        execution_mode = "자동 모드" if preview_strategy.get("auto_mode") else "수동 모드"
+
+    top_left, top_center, top_right = st.columns([1.1, 1.1, 1.6])
+    with top_left:
+        with st.container(border=True):
+            st.markdown("##### 실행 요약")
+            st.caption("오늘 바로 보는 핵심 설정")
+            st.metric("대상 국가", f"{display_country(selected_country)} ({selected_country})")
+            st.caption(f"기준 날짜: {format_local_date(today_value)}")
+            st.caption(f"실행 방식: {execution_mode}")
+    with top_center:
+        with st.container(border=True):
+            st.markdown("##### 공략 방향")
+            st.metric("세그먼트/바이어스", str(current_segment))
+            st.caption(f"전략 편향: {display_strategy_bias(preview_strategy.get('strategy_bias'))}")
+            st.caption(f"선택 패턴: {len(selected_patterns)}개")
+    with top_right:
+        with st.container(border=True):
+            st.markdown("##### 이번 실행 한 줄 해석")
+            if preview_mode == "segment_preset":
+                st.write(
+                    "세그먼트 프리셋을 기본 실행 기준으로 사용합니다. "
+                    "프리셋의 국가별 쿼리를 그대로 쓰고, 필요할 때만 수동 탐색 조건으로 미세 조정합니다."
+                )
+            elif preview_strategy.get("auto_mode"):
+                st.write(
+                    "탐색 조건이 비어 있어 시스템이 자동으로 공략 패턴을 고른 상태입니다. "
+                    "이번 실행은 아래 쿼리를 기준으로 첫 리드를 찾아 같은 결의 회사만 모으도록 움직입니다."
+                )
+            else:
+                st.write(
+                    "직접 입력한 탐색 조건을 우선으로 사용합니다. "
+                    "아래 쿼리를 그대로 기준 삼아 같은 결의 회사만 찾도록 움직입니다."
+                )
+            st.markdown(f"**실제 탐색 기준**  \n`{preview_strategy.get('resolved_query', '-')}`")
+
+    if selected_patterns:
+        with st.expander("자동으로 선택된 공략 패턴", expanded=False):
+            render_adjustable_dataframe(
+                "자동으로 선택된 공략 패턴",
+                [
+                    {
+                        "패턴": row["pattern_name"],
+                        "추천 업종": ", ".join(row["target_industries"]),
+                        "우리가 유리한 이유": row["why_we_can_win"],
+                        "추천 오퍼": row["offer_fit"],
+                        "우선순위": row["priority_score"],
+                    }
+                    for row in selected_patterns
+                ],
+                "strategy_patterns",
+            )
+
+    if not latest_run:
+        return
+
+    if latest_inputs.get("segment_label"):
+        st.info(
+            f"최근 실행 세그먼트: **{latest_inputs.get('segment_label')}** | "
+            f"국가: **{display_country(latest_run.get('target_country'))}**"
+        )
+
+    strategy_snapshot = get_run_strategy_snapshot(latest_run)
+    quality_rows = build_quality_rows(latest_run["id"])
+
+    st.caption(
+        f"최근 실행 기준 쿼리: `{strategy_snapshot.get('resolved_query') or latest_run.get('lead_query') or '-'}`"
+    )
+    st.caption(quality_summary_text(quality_rows))
+
+    if quality_rows:
+        with st.expander("최근 실행 전략 로그", expanded=False):
+            render_adjustable_dataframe(
+                "최근 실행 전략 로그",
+                [
+                    {
+                        "회사명": row["company_name"],
+                        "점수": row["score"],
+                        "등급": row["label"],
+                        "빈 섹션": ", ".join(row["missing_sections"][:3]) if row["missing_sections"] else "-",
+                    }
+                    for row in quality_rows
+                ],
+                "strategy_quality",
+            )
+
+
+def render_segment_calendar_tab_v2(*, notify_email: str, test_mode: bool) -> None:
+    st.subheader("세그먼트 캘린더")
+    st.caption("세그먼트별 발송 일정과 실제 발송 기록을 같은 화면에서 관리합니다.")
+
+    presets = list_segment_presets()
+    preset_lookup = {preset["id"]: preset for preset in presets}
+
+    for preset in presets:
+        launch_defaults = resolve_segment_execution_inputs(str(preset["id"]))
+        preset_title = (
+            f"{preset['label']} | "
+            f"{', '.join(display_country(code) for code in launch_defaults['recommended_countries'])} | "
+            f"리드 목표 {launch_defaults['default_max_companies']}"
+        )
+        with st.expander(preset_title, expanded=False):
+            st.write(preset["description"])
+            st.write(f"오퍼: `{preset['offer']}`")
+            st.write(f"추천 국가: {', '.join(display_country(code) for code in launch_defaults['recommended_countries'])}")
+            st.write(f"대상 직책: {', '.join(preset['target_roles'])}")
+            st.write("대표 포트폴리오")
+            for portfolio_row in preset["portfolio"]:
+                st.markdown(f"- {portfolio_row}")
+
+            instant_cols = st.columns([1.15, 0.9, 1.0])
+            with instant_cols[0]:
+                launch_country = st.selectbox(
+                    "즉시 실행 국가",
+                    options=launch_defaults["recommended_countries"],
+                    index=max(
+                        0,
+                        launch_defaults["recommended_countries"].index(launch_defaults["target_country"]),
+                    ),
+                    format_func=lambda code: f"{display_country(code)} ({code})",
+                    key=f"segment_calendar_preset_country_{preset['id']}",
+                )
+            with instant_cols[1]:
+                launch_max_companies = st.number_input(
+                    "리드 수",
+                    min_value=1,
+                    max_value=50,
+                    value=int(launch_defaults["default_max_companies"]),
+                    step=1,
+                    key=f"segment_calendar_preset_max_{preset['id']}",
+                )
+            with instant_cols[2]:
+                st.caption(" ")
+                if st.button("즉시 실행", key=f"segment_calendar_preset_launch_{preset['id']}", use_container_width=True):
+                    instant_inputs = resolve_segment_execution_inputs(str(preset["id"]), str(launch_country))
+                    launch_background_run(
+                        target_country=instant_inputs["target_country"],
+                        lead_query=instant_inputs["lead_query"],
+                        lead_mode=instant_inputs["lead_mode"],
+                        max_companies=int(launch_max_companies),
+                        notify_email=notify_email,
+                        test_mode=test_mode,
+                        trigger_source="segment_calendar_preset",
+                        segment_id=instant_inputs["segment_id"],
+                        segment_label=instant_inputs["segment_label"],
+                        segment_brief=instant_inputs["segment_brief"],
+                    )
+                    set_ui_notice(
+                        "success",
+                        f"`{instant_inputs['segment_label']}` 프리셋으로 즉시 실행을 시작했습니다.",
+                    )
+                    st.rerun()
+
+            launch_query = build_segment_query(str(preset["id"]), str(launch_country))
+            st.caption(f"즉시 실행 기준 쿼리: `{launch_query}`")
+
+    st.markdown("#### 일정 추가")
+    with st.form("segment_calendar_form", clear_on_submit=False):
+        schedule_date = st.date_input("캘린더 날짜", value=date.today(), key="segment_calendar_form_date")
+        segment_id = st.selectbox(
+            "세그먼트",
+            options=[preset["id"] for preset in presets],
+            format_func=lambda value: preset_lookup[value]["label"],
+            key="segment_calendar_form_segment",
+        )
+        selected_preset = resolve_segment_execution_inputs(segment_id)
+        target_country = st.selectbox(
+            "대상 국가",
+            options=selected_preset["recommended_countries"],
+            index=max(0, selected_preset["recommended_countries"].index(selected_preset["target_country"])),
+            format_func=lambda code: f"{display_country(code)} ({code})",
+            key="segment_calendar_form_country",
+        )
+        send_window = st.selectbox("발송 시간대", options=["오전", "오후", "종일"], key="segment_calendar_form_window")
+        max_companies = st.number_input(
+            "최대 리드 수",
+            min_value=1,
+            max_value=50,
+            value=int(selected_preset["default_max_companies"]),
+            step=1,
+            key="segment_calendar_form_max_companies",
+        )
+        notes = st.text_area("운영 메모", height=90, key="segment_calendar_form_notes")
+        preview_query = build_segment_query(segment_id, target_country)
+        st.caption(f"이 일정으로 실행할 기본 탐색 쿼리: `{preview_query}`")
+        submitted = st.form_submit_button("일정 저장", use_container_width=True)
+
+    if submitted:
+        entry = create_segment_calendar_entry(
+            schedule_date=schedule_date,
+            segment_id=segment_id,
+            target_country=target_country,
+            send_window=send_window,
+            max_companies=int(max_companies),
+            notes=notes,
+        )
+        add_segment_calendar_entry(entry)
+        set_ui_notice("success", f"{format_local_date(schedule_date)} 일정에 `{entry['segment_label']}` 세그먼트를 추가했습니다.")
+        st.rerun()
+
+    st.markdown("#### 일정 / 발송 아카이브")
+    selected_date = st.date_input("확인 날짜", value=date.today(), key="segment_calendar_view_date")
+    selected_rows = list_segment_calendar_entries_for_date(selected_date)
+    archive_rows = build_delivery_archive_rows(selected_date)
+    archive_summary = summarize_delivery_archive(archive_rows)
+
+    summary_cols = st.columns(4)
+    summary_cols[0].metric("등록 일정", str(len(selected_rows)))
+    summary_cols[1].metric("발송 완료", str(archive_summary["sent"]))
+    summary_cols[2].metric("차단 / 실패", str(archive_summary["blocked"] + archive_summary["failed"]))
+    summary_cols[3].metric("테스트 발송", str(archive_summary["tests"]))
+
+    if not selected_rows:
+        st.caption(f"{format_local_date(selected_date)}에는 등록된 세그먼트 일정이 없습니다.")
+    else:
+        for row in selected_rows:
+            preset = get_segment_preset(str(row.get("segment_id") or ""))
+            row_title = (
+                f"{row.get('segment_label', '-')} | "
+                f"{display_country(row.get('target_country'))} ({row.get('target_country')}) | "
+                f"{row.get('send_window')} | 목표 {row.get('max_companies')}"
+            )
+            with st.expander(row_title, expanded=False):
+                if preset:
+                    st.write(f"오퍼: `{preset['offer']}`")
+                st.write(f"최대 리드 목표: `{row.get('max_companies')}`")
+                st.write(f"탐색 쿼리: `{row.get('lead_query') or '-'}`")
+                if row.get("notes"):
+                    st.write(f"메모: {row['notes']}")
+                if row.get("last_launched_at"):
+                    st.caption(f"마지막 실행: {format_local_datetime(row.get('last_launched_at'))}")
+
+                action_left, action_right = st.columns([1.4, 1.0])
+                with action_left:
+                    if st.button("이 일정으로 실행", key=f"segment_calendar_launch_{row['id']}", use_container_width=True):
+                        launch_background_run(
+                            target_country=str(row.get("target_country") or "US"),
+                            lead_query=str(row.get("lead_query") or ""),
+                            lead_mode="region_or_industry",
+                            max_companies=int(row.get("max_companies") or 10),
+                            notify_email=notify_email,
+                            test_mode=test_mode,
+                            trigger_source="segment_calendar",
+                            segment_id=str(row.get("segment_id") or ""),
+                            segment_label=str(row.get("segment_label") or ""),
+                            segment_brief=str(row.get("segment_brief") or ""),
+                        )
+                        mark_segment_calendar_entry_launched(str(row["id"]))
+                        set_ui_notice("success", f"`{row.get('segment_label')}` 일정으로 런을 시작했습니다.")
+                        st.rerun()
+                with action_right:
+                    if st.button("일정 삭제", key=f"segment_calendar_delete_{row['id']}", use_container_width=True):
+                        delete_segment_calendar_entry(str(row["id"]))
+                        set_ui_notice("success", "세그먼트 일정이 삭제되었습니다.")
+                        st.rerun()
+
+    st.markdown("#### 날짜별 발송 아카이브")
+    if archive_rows:
+        for row in archive_rows:
+            render_compact_row(
+                title=row.get("subject") or "-",
+                subtitle=f"{row.get('company_name')} | {row.get('segment_label')} | {row.get('country_label')}",
+                meta=f"{format_local_datetime(row.get('created_at'))} | {row.get('recipient')} | {', '.join(row.get('attachments') or []) or '-'}",
+                pill_html=build_status_pill_html(row.get("status_label") or "-", tone=tone_for_status(row.get("status"))),
+                accent_tone=tone_for_status(row.get("status")),
+            )
+    else:
+        st.info("선택한 날짜에는 아웃바운드 발송 기록이 아직 없습니다.")
+
+    daily_rollup = build_daily_delivery_rollup(days=14)
+    if daily_rollup:
+        with st.expander("최근 14일 발송 요약", expanded=False):
+            render_adjustable_dataframe("최근 14일 발송 요약", daily_rollup, "segment_calendar_archive_rollup")
+
+
 def main() -> None:
     load_runtime()
     st.set_page_config(page_title="세일즈 운영 콘솔", layout="wide")
@@ -4995,34 +5324,116 @@ def main() -> None:
     elif "dashboard_auto_refresh_enabled" not in st.session_state:
         st.session_state["dashboard_auto_refresh_enabled"] = bool(running_run)
 
+    segment_presets = list_segment_presets()
+    preset_lookup = {preset["id"]: preset for preset in segment_presets}
+    default_segment_id = segment_presets[0]["id"] if segment_presets else ""
+    selected_segment_inputs: dict[str, Any] | None = None
+    selected_segment_id = ""
+    selected_segment_label = ""
+    selected_segment_brief = ""
+    use_manual_query = False
+
     with st.sidebar:
         st.header("실행 시작")
         with st.container(border=True):
             with st.expander("1. 기본 조건", expanded=True):
-                target_country = st.selectbox(
-                    "대상 국가",
-                    COUNTRIES,
-                    index=0,
-                    format_func=lambda code: f"{COUNTRY_LABELS[code]} ({code})",
-                )
-                country_defaults = COUNTRY_DEFAULTS[target_country]
+                if segment_presets:
+                    if st.session_state.get("dashboard_segment_id") not in preset_lookup:
+                        st.session_state["dashboard_segment_id"] = default_segment_id
 
-                lead_mode = st.selectbox(
-                    "탐색 방식",
-                    ["region_or_industry", "company_name"],
-                    index=0,
-                    format_func=lambda value: LEAD_MODE_LABELS.get(value, value),
-                )
-                lead_query = st.text_area(
-                    "탐색 조건",
-                    value="",
-                    height=100,
-                    placeholder=(
-                        "비워두면 자동 모드로 실행됩니다. "
-                        f"예시 기준: `{country_defaults['lead_query']}`"
-                    ),
-                )
-                max_companies = st.slider("최대 회사 수", min_value=1, max_value=10, value=2)
+                    selected_segment_id = st.selectbox(
+                        "세그먼트 프리셋",
+                        options=[preset["id"] for preset in segment_presets],
+                        format_func=lambda value: preset_lookup[value]["label"],
+                        key="dashboard_segment_id",
+                    )
+
+                    if st.session_state.get("_dashboard_segment_last_id") != selected_segment_id:
+                        segment_defaults = resolve_segment_execution_inputs(selected_segment_id)
+                        st.session_state["_dashboard_segment_last_id"] = selected_segment_id
+                        st.session_state["dashboard_segment_country"] = segment_defaults["target_country"]
+                        st.session_state["dashboard_segment_max_companies"] = int(segment_defaults["default_max_companies"])
+
+                    selected_segment_inputs = resolve_segment_execution_inputs(
+                        selected_segment_id,
+                        st.session_state.get("dashboard_segment_country"),
+                    )
+                    if st.session_state.get("dashboard_segment_country") not in selected_segment_inputs["recommended_countries"]:
+                        st.session_state["dashboard_segment_country"] = selected_segment_inputs["target_country"]
+                        selected_segment_inputs = resolve_segment_execution_inputs(
+                            selected_segment_id,
+                            st.session_state["dashboard_segment_country"],
+                        )
+
+                    target_country = st.selectbox(
+                        "대상 국가",
+                        selected_segment_inputs["recommended_countries"],
+                        format_func=lambda code: f"{COUNTRY_LABELS[code]} ({code})",
+                        key="dashboard_segment_country",
+                    )
+                    selected_segment_inputs = resolve_segment_execution_inputs(selected_segment_id, target_country)
+                    selected_segment_label = str(selected_segment_inputs["segment_label"])
+                    selected_segment_brief = str(selected_segment_inputs["segment_brief"])
+                    country_defaults = COUNTRY_DEFAULTS[target_country]
+
+                    st.caption(f"기본 오퍼: {selected_segment_inputs['offer']}")
+                    st.caption(f"대표 직책: {', '.join(selected_segment_inputs['target_roles'][:3])}")
+                    st.caption(f"기본 탐색 기준: `{selected_segment_inputs['lead_query']}`")
+
+                    max_default = min(20, max(1, int(selected_segment_inputs["default_max_companies"])))
+                    current_max = int(st.session_state.get("dashboard_segment_max_companies", max_default))
+                    if current_max < 1 or current_max > 20:
+                        st.session_state["dashboard_segment_max_companies"] = max_default
+                    max_companies = st.slider("최대 회사 수", min_value=1, max_value=20, key="dashboard_segment_max_companies")
+
+                    with st.expander("수동 탐색 조건", expanded=False):
+                        use_manual_query = st.toggle("직접 탐색 조건 사용", value=False, key="dashboard_use_manual_query")
+                        if use_manual_query:
+                            st.selectbox(
+                                "탐색 방식",
+                                ["region_or_industry", "company_name"],
+                                format_func=lambda value: LEAD_MODE_LABELS.get(value, value),
+                                key="dashboard_manual_lead_mode",
+                            )
+                            st.text_area(
+                                "탐색 조건",
+                                height=100,
+                                placeholder=(
+                                    "비우면 프리셋 쿼리를 그대로 사용합니다. "
+                                    f"기본 쿼리: `{selected_segment_inputs['lead_query']}`"
+                                ),
+                                key="dashboard_manual_lead_query",
+                            )
+
+                    manual_lead_mode = str(st.session_state.get("dashboard_manual_lead_mode") or "region_or_industry")
+                    manual_lead_query = str(st.session_state.get("dashboard_manual_lead_query") or "").strip()
+                    lead_mode = manual_lead_mode if use_manual_query else selected_segment_inputs["lead_mode"]
+                    lead_query = manual_lead_query or str(selected_segment_inputs["lead_query"])
+                else:
+                    target_country = st.selectbox(
+                        "대상 국가",
+                        COUNTRIES,
+                        index=0,
+                        format_func=lambda code: f"{COUNTRY_LABELS[code]} ({code})",
+                    )
+                    country_defaults = COUNTRY_DEFAULTS[target_country]
+
+                    lead_mode = st.selectbox(
+                        "탐색 방식",
+                        ["region_or_industry", "company_name"],
+                        index=0,
+                        format_func=lambda value: LEAD_MODE_LABELS.get(value, value),
+                    )
+                    lead_query = st.text_area(
+                        "탐색 조건",
+                        value="",
+                        height=100,
+                        placeholder=(
+                            "비워두면 자동 모드로 실행됩니다. "
+                            f"예시 기준: `{country_defaults['lead_query']}`"
+                        ),
+                    )
+                    max_companies = st.slider("최대 회사 수", min_value=1, max_value=10, value=2)
 
             preview_strategy = build_strategy_snapshot(
                 target_country=target_country,
@@ -5031,14 +5442,24 @@ def main() -> None:
             )
             preview_patterns = preview_strategy.get("selected_patterns", [])
             preview_pattern_text = ", ".join(pattern.get("pattern_name", "-") for pattern in preview_patterns[:2]) if preview_patterns else "직접 지정 조건"
+            preview_mode = "segment_preset" if selected_segment_inputs else ("auto" if preview_strategy.get("auto_mode") else "manual")
 
             with st.expander("2. 실행 프리뷰 · 시작", expanded=True):
-                preview_segment = "자동 패턴 추천" if preview_strategy.get("auto_mode") else "직접 지정 타깃"
                 with st.container(border=True):
-                    st.markdown(f"**{'자동 모드' if preview_strategy.get('auto_mode') else '수동 모드'}**")
-                    st.caption(f"세그먼트: {preview_segment}")
-                    st.caption(f"탐색 기준: {preview_strategy.get('resolved_query', '-')}")
-                    st.caption(f"대표 패턴: {preview_pattern_text}")
+                    if selected_segment_inputs:
+                        preview_heading = "세그먼트 프리셋"
+                        if use_manual_query and str(st.session_state.get("dashboard_manual_lead_query") or "").strip():
+                            preview_heading = "세그먼트 프리셋 + 수동 보정"
+                        st.markdown(f"**{preview_heading}**")
+                        st.caption(f"세그먼트: {selected_segment_label}")
+                        st.caption(f"탐색 기준: {lead_query or '-'}")
+                        st.caption(f"추천 오퍼: {selected_segment_inputs['offer']}")
+                    else:
+                        preview_segment = "자동 패턴 추천" if preview_strategy.get("auto_mode") else "직접 지정 타깃"
+                        st.markdown(f"**{'자동 모드' if preview_strategy.get('auto_mode') else '수동 모드'}**")
+                        st.caption(f"세그먼트: {preview_segment}")
+                        st.caption(f"탐색 기준: {preview_strategy.get('resolved_query', '-')}")
+                        st.caption(f"대표 패턴: {preview_pattern_text}")
 
                 notify_email = st.text_input(
                     "알림 받을 메일",
@@ -5071,6 +5492,9 @@ def main() -> None:
                             max_companies=max_companies,
                             notify_email=notify_email.strip(),
                             test_mode=test_mode,
+                            segment_id=selected_segment_id,
+                            segment_label=selected_segment_label,
+                            segment_brief=selected_segment_brief,
                         )
                         st.session_state["dashboard_auto_refresh_enable_pending"] = True
                         st.session_state["run_just_launched"] = True
@@ -5098,14 +5522,16 @@ def main() -> None:
     )
 
     with tabs[0]:
-        render_strategy_tab(
+        render_strategy_tab_v2(
             preview_strategy=preview_strategy,
             selected_country=target_country,
             latest_run=latest_run,
+            preview_mode=preview_mode,
+            preview_segment_label=selected_segment_label,
         )
 
     with tabs[1]:
-        render_segment_calendar_tab(
+        render_segment_calendar_tab_v2(
             notify_email=notify_email.strip(),
             test_mode=test_mode,
         )
