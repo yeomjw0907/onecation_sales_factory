@@ -59,6 +59,7 @@ class SlackReviewTests(unittest.TestCase):
 
         self.assertIn("approval_preview", action_ids)
         self.assertIn("approval_approve", action_ids)
+        self.assertIn("approval_confirm_send", action_ids)
         self.assertIn("approval_request_changes", action_ids)
         self.assertIn("approval_send_test", action_ids)
 
@@ -144,10 +145,55 @@ class SlackReviewTests(unittest.TestCase):
             if block.get("type") == "actions":
                 action_ids.extend(element.get("action_id") for element in block.get("elements", []) if element.get("action_id"))
         self.assertIn("approval_approve", action_ids)
+        self.assertIn("approval_confirm_send", action_ids)
         self.assertIn("approval_request_changes", action_ids)
         self.assertIn("approval_send_test", action_ids)
         self.assertIn("approval_send_pdf", action_ids)
         self.assertIn("approval_send_docx", action_ids)
+
+    @patch("sales_factory.slack_review.build_live_send_preview")
+    def test_confirm_send_modal_contains_live_send_summary(self, mock_build_live_send_preview) -> None:
+        mock_build_live_send_preview.return_value = {
+            "company_name": "Acme",
+            "recipient": "hello@example.com",
+            "subject": "Acme proposal",
+            "attachment_names": ["proposal.pdf", "proposal.docx"],
+            "blocked_reasons": ["verified official homepage or email domain anchor is missing"],
+            "test_mode": True,
+        }
+
+        modal = slack_review._build_confirm_send_modal({"id": "item-1"})
+        self.assertEqual(modal["callback_id"], "approval_confirm_send_modal")
+        self.assertEqual(modal["submit"]["text"], "실제 발송")
+        block_text = "\n".join(
+            block.get("text", {}).get("text", "")
+            for block in modal["blocks"]
+            if isinstance(block.get("text"), dict)
+        )
+        self.assertIn("hello@example.com", block_text)
+        self.assertIn("proposal.pdf", block_text)
+        self.assertIn("Acme proposal", block_text)
+
+    @patch("sales_factory.slack_review.approve_and_send_approval_item", return_value=(True, "sent"))
+    def test_handle_approve_and_send_async_posts_feedback_and_reaction(self, mock_approve_and_send) -> None:
+        client = Mock()
+
+        slack_review._handle_approve_and_send_async(
+            client,
+            item={"id": "item-1", "title": "Acme outbound"},
+            reviewer_identity="tester",
+            channel_id="C123",
+            user_id="U123",
+            message_ts="1712345678.000100",
+        )
+
+        mock_approve_and_send.assert_called_once()
+        client.reactions_add.assert_called_once_with(
+            channel="C123",
+            timestamp="1712345678.000100",
+            name="outbox_tray",
+        )
+        client.chat_postEphemeral.assert_called_once()
 
 
 if __name__ == "__main__":

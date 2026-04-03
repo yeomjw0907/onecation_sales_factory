@@ -11,7 +11,13 @@ SRC_DIR = ROOT_DIR / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from sales_factory.managed_run import build_inputs, build_llm_retry_overrides, is_retryable_llm_error
+from sales_factory.managed_run import (
+    build_inputs,
+    build_llm_retry_overrides,
+    build_quality_rework_feedback,
+    is_retryable_llm_error,
+    should_queue_quality_rework,
+)
 
 
 class ManagedRunRetryTests(unittest.TestCase):
@@ -28,6 +34,8 @@ class ManagedRunRetryTests(unittest.TestCase):
             segment_id="korea-entry-overseas",
             segment_label="한국 시장 진입형 해외 기업",
             segment_brief="Only target overseas companies entering Korea.",
+            quality_rework_feedback="",
+            quality_rework_attempt=0,
         )
 
         with patch.dict("os.environ", {"SALES_FACTORY_SENDER_NAME": "Minjun Kim"}, clear=False), patch(
@@ -41,6 +49,8 @@ class ManagedRunRetryTests(unittest.TestCase):
         self.assertEqual(inputs["segment_id"], "korea-entry-overseas")
         self.assertEqual(inputs["segment_label"], "한국 시장 진입형 해외 기업")
         self.assertEqual(inputs["segment_brief"], "Only target overseas companies entering Korea.")
+        self.assertEqual(inputs["quality_rework_feedback"], "")
+        self.assertEqual(inputs["quality_rework_attempt"], "0")
 
     def test_is_retryable_llm_error_detects_transient_503(self) -> None:
         self.assertTrue(is_retryable_llm_error(RuntimeError("503 Service Unavailable: model is overloaded")))
@@ -56,6 +66,27 @@ class ManagedRunRetryTests(unittest.TestCase):
 
         self.assertEqual(overrides["gemini-2.5-pro"], "gemini/gemini-2.5-flash")
         self.assertEqual(overrides["gemini-2.5-flash"], "gemini/gemini-2.5-flash-lite")
+
+    def test_should_queue_quality_rework_when_score_is_below_threshold(self) -> None:
+        self.assertTrue(
+            should_queue_quality_rework(
+                proposal_quality={"score": 82},
+                validation_issues=[],
+                attempt=0,
+            )
+        )
+
+    def test_build_quality_rework_feedback_lists_issues(self) -> None:
+        feedback = build_quality_rework_feedback(
+            company_name="Acme Co.",
+            proposal_quality={"score": 81},
+            validation_issues=["email_sequence: unresolved placeholders -> [city]"],
+            attempt=1,
+        )
+
+        self.assertIn("Acme Co.", feedback)
+        self.assertIn("Raise proposal quality", feedback)
+        self.assertIn("unresolved placeholders", feedback)
 
 
 if __name__ == "__main__":

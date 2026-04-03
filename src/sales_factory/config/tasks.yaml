@@ -327,6 +327,8 @@ proposal_task:
     can translate it without changing the business logic.
 
     Use {currency} for pricing guidance.
+    Quality rework attempt: {quality_rework_attempt}
+    Quality rework feedback: {quality_rework_feedback}
     The proposal must be polite, specific, and commercially sharp. Include a
     short greeting near the front and a short thank-you closing at the end.
     Always use plain ASCII punctuation instead of smart quotes or typographic
@@ -370,6 +372,8 @@ proposal_task:
     - Use only approved proof points that appear above.
     - If no approved named case studies or metrics are provided, do not invent them.
     - Never fabricate client names, logos, conversion lifts, revenue lifts, years, or awards.
+    - If quality_rework_feedback is provided, treat it as mandatory internal QA notes
+      and explicitly fix every listed issue before finalizing the draft.
   expected_output: >
     For each prioritized company, create one H1 section:
     # Company Name
@@ -448,6 +452,8 @@ proposal_localization_task:
     will be rendered into Word and PDF.
 
     Rules:
+    - Quality rework attempt: {quality_rework_attempt}
+    - Quality rework feedback: {quality_rework_feedback}
     - Preserve the exact H1 company name from proposal_task.
     - Preserve every `##` section heading from proposal_task exactly in English.
       These headings are pipeline control markers and must not change.
@@ -468,6 +474,8 @@ proposal_localization_task:
     - Keep Onecation and the exact company name unchanged.
     - When the target language is English, lightly polish proposal_task but keep
       the same structure and business meaning.
+    - If quality_rework_feedback is provided, treat it as mandatory internal QA notes
+      and explicitly fix every listed issue before finalizing the localized proposal.
   expected_output: >
     Reproduce the exact company-by-company markdown structure from proposal_task:
     - the same `# Company Name` sections
@@ -493,6 +501,8 @@ email_outreach_task:
     - one final follow-up email (day 10-14)
 
     Requirements:
+    - Quality rework attempt: {quality_rework_attempt}
+    - Quality rework feedback: {quality_rework_feedback}
     - Mention one company-specific observation.
     - Mention one market or competitor insight.
     - State one concrete way Onecation would help.
@@ -538,6 +548,8 @@ email_outreach_task:
     resolution, getaddrinfo, timeout, connection refused, or browser error-page
     wording in customer-facing copy. Rewrite them into neutral language about
     incomplete verification of the current web presence.
+    - If quality_rework_feedback is provided, treat it as mandatory internal QA notes
+      and explicitly fix every listed issue before finalizing the outbound sequence.
   expected_output: >
     For each prioritized company, create one H1 section:
     # Company Name
@@ -585,6 +597,8 @@ email_localization_task:
     send-ready sequence that internal tools will parse.
 
     Rules:
+    - Quality rework attempt: {quality_rework_attempt}
+    - Quality rework feedback: {quality_rework_feedback}
     - Preserve the exact H1 company name from email_outreach_task.
     - Preserve the exact `##` section headings:
       `## Primary Outbound Email`, `## Follow Up 1`, `## Follow Up 2`,
@@ -618,6 +632,8 @@ email_localization_task:
     - Keep Onecation and the exact company name unchanged.
     - When the target language is English, lightly polish email_outreach_task
       but keep the same structure and meaning.
+    - If quality_rework_feedback is provided, treat it as mandatory internal QA notes
+      and explicitly fix every listed issue before finalizing the localized email.
   expected_output: >
     Reproduce the exact company-by-company markdown structure from
     email_outreach_task:

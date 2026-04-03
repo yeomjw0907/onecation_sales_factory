@@ -9,7 +9,9 @@ from typing import Any
 from sales_factory.auto_delivery import build_primary_email_payload
 from sales_factory.review_ops import (
     approve_approval_item,
+    approve_and_send_approval_item,
     asset_preview_text,
+    build_live_send_preview,
     load_approval_assets,
     reject_approval_item,
     send_test_outbound_email,
@@ -147,6 +149,12 @@ def build_review_ready_slack_blocks(
                         },
                         {
                             "type": "button",
+                            "text": {"type": "plain_text", "text": "바로 발송", "emoji": True},
+                            "action_id": "approval_confirm_send",
+                            "value": item["id"],
+                        },
+                        {
+                            "type": "button",
                             "text": {"type": "plain_text", "text": "보완 요청", "emoji": True},
                             "style": "danger",
                             "action_id": "approval_request_changes",
@@ -157,11 +165,6 @@ def build_review_ready_slack_blocks(
                             "text": {"type": "plain_text", "text": "테스트 메일", "emoji": True},
                             "action_id": "approval_send_test",
                             "value": item["id"],
-                        },
-                        {
-                            "type": "button",
-                            "text": {"type": "plain_text", "text": "콘솔", "emoji": True},
-                            "url": app_url,
                         },
                     ],
                 },
@@ -189,6 +192,16 @@ def _post_ephemeral(client: Any, *, channel_id: str | None, user_id: str | None,
     if not channel_id or not user_id:
         return
     client.chat_postEphemeral(channel=channel_id, user=user_id, text=text)
+
+
+def _extract_action_context(body: dict[str, Any]) -> dict[str, str | None]:
+    view = body.get("view") or {}
+    metadata = parse_json_value(view.get("private_metadata"), {})
+    return {
+        "channel_id": body.get("channel", {}).get("id") or metadata.get("channel_id"),
+        "user_id": body.get("user", {}).get("id") or metadata.get("user_id"),
+        "message_ts": body.get("message", {}).get("ts") or metadata.get("message_ts"),
+    }
 
 
 def _notify_action_result(client: Any, body: dict[str, Any], *, text: str, title: str = "처리 결과") -> None:
@@ -273,6 +286,42 @@ def _handle_request_changes_async(
             channel_id=channel_id,
             user_id=user_id,
             text=f"보완 요청 처리 중 오류가 발생했습니다: {exc}",
+        )
+
+
+def _handle_approve_and_send_async(
+    client: Any,
+    *,
+    item: dict[str, Any],
+    reviewer_identity: str,
+    channel_id: str | None,
+    user_id: str | None,
+    message_ts: str | None,
+) -> None:
+    try:
+        sent, message = approve_and_send_approval_item(
+            item,
+            reviewer_identity=reviewer_identity,
+        )
+        if sent:
+            _try_add_message_reaction(
+                client,
+                channel_id=channel_id,
+                message_ts=message_ts,
+                name="outbox_tray",
+            )
+        _post_ephemeral(
+            client,
+            channel_id=channel_id,
+            user_id=user_id,
+            text=message,
+        )
+    except Exception as exc:
+        _post_ephemeral(
+            client,
+            channel_id=channel_id,
+            user_id=user_id,
+            text=f"실제 발송 처리 중 오류가 발생했습니다: {exc}",
         )
 
 
@@ -426,6 +475,12 @@ def _build_preview_modal(item: dict[str, Any]) -> dict[str, Any]:
                 },
                 {
                     "type": "button",
+                    "text": {"type": "plain_text", "text": "바로 발송", "emoji": True},
+                    "action_id": "approval_confirm_send",
+                    "value": item["id"],
+                },
+                {
+                    "type": "button",
                     "text": {"type": "plain_text", "text": "보완 요청", "emoji": True},
                     "style": "danger",
                     "action_id": "approval_request_changes",
@@ -472,8 +527,64 @@ def _build_preview_modal(item: dict[str, Any]) -> dict[str, Any]:
     return {
         "type": "modal",
         "callback_id": "approval_preview_modal",
+        "private_metadata": json.dumps({"item_id": item["id"]}),
         "title": {"type": "plain_text", "text": "산출물 미리보기"},
         "close": {"type": "plain_text", "text": "닫기"},
+        "blocks": blocks,
+    }
+
+
+def _build_confirm_send_modal(item: dict[str, Any]) -> dict[str, Any]:
+    preview = build_live_send_preview(item)
+    recipient = preview.get("recipient") or "(missing)"
+    attachments = preview.get("attachment_names") or []
+    blocked_reasons = preview.get("blocked_reasons") or []
+    test_mode_label = "원본 실행은 테스트 모드였습니다." if preview.get("test_mode") else "원본 실행은 실제 모드였습니다."
+
+    blocks: list[dict[str, Any]] = [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    "*정말 이 업체에 바로 발송하시겠습니까?*\n"
+                    f"*회사:* {preview.get('company_name')}\n"
+                    f"*수신 이메일:* `{recipient}`\n"
+                    f"*메일 제목:* `{_truncate_for_slack(str(preview.get('subject') or '-'), limit=280)}`\n"
+                    f"*첨부 파일:* {', '.join(attachments) if attachments else '첨부 없음'}\n"
+                    f"*참고:* {test_mode_label}"
+                ),
+            },
+        }
+    ]
+    if blocked_reasons:
+        blocks.append(
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "*주의 사항*\n" + "\n".join(f"• {reason}" for reason in blocked_reasons[:4]),
+                },
+            }
+        )
+    blocks.append(
+        {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": "이 버튼은 테스트 메일이 아니라 실제 고객 발송입니다.",
+                }
+            ],
+        }
+    )
+    return {
+        "type": "modal",
+        "callback_id": "approval_confirm_send_modal",
+        "private_metadata": json.dumps({"item_id": item["id"]}),
+        "title": {"type": "plain_text", "text": "실제 발송 확인"},
+        "submit": {"type": "plain_text", "text": "실제 발송"},
+        "close": {"type": "plain_text", "text": "취소"},
         "blocks": blocks,
     }
 
@@ -517,34 +628,40 @@ def ensure_slack_socket_mode_started() -> bool:
             ack()
             item_id = body["actions"][0]["value"]
             item = get_approval_item(item_id)
+            context = _extract_action_context(body)
             if not item:
                 _post_ephemeral(
                     client,
-                    channel_id=body.get("channel", {}).get("id"),
-                    user_id=body.get("user", {}).get("id"),
+                    channel_id=context["channel_id"],
+                    user_id=context["user_id"],
                     text="승인 항목을 찾지 못했습니다.",
                 )
                 return
-            client.views_open(trigger_id=body["trigger_id"], view=_build_preview_modal(item))
+            view = _build_preview_modal(item)
+            metadata = parse_json_value(view.get("private_metadata"), {})
+            metadata.update(context)
+            view["private_metadata"] = json.dumps(metadata)
+            client.views_open(trigger_id=body["trigger_id"], view=view)
 
         @app.action("approval_approve")
         def _approval_approve(ack: Any, body: dict[str, Any], client: Any) -> None:
             ack()
             item_id = body["actions"][0]["value"]
             item = get_approval_item(item_id)
+            context = _extract_action_context(body)
             if not item:
                 _post_ephemeral(
                     client,
-                    channel_id=body.get("channel", {}).get("id"),
-                    user_id=body.get("user", {}).get("id"),
+                    channel_id=context["channel_id"],
+                    user_id=context["user_id"],
                     text="승인 항목을 찾지 못했습니다.",
                 )
                 return
             approve_approval_item(item, reviewer_identity=body.get("user", {}).get("username") or body.get("user", {}).get("id", ""))
             _try_add_message_reaction(
                 client,
-                channel_id=body.get("channel", {}).get("id"),
-                message_ts=body.get("message", {}).get("ts"),
+                channel_id=context["channel_id"],
+                message_ts=context["message_ts"],
                 name="white_check_mark",
             )
             _notify_action_result(
@@ -555,22 +672,59 @@ def ensure_slack_socket_mode_started() -> bool:
             )
             _post_ephemeral(
                 client,
-                channel_id=body.get("channel", {}).get("id"),
-                user_id=body.get("user", {}).get("id"),
+                channel_id=context["channel_id"],
+                user_id=context["user_id"],
                 text=f"{item.get('company_name') or item.get('title')} 승인 처리했습니다.",
             )
+
+        @app.action("approval_confirm_send")
+        def _approval_confirm_send(ack: Any, body: dict[str, Any], client: Any) -> None:
+            ack()
+            item_id = body["actions"][0]["value"]
+            item = get_approval_item(item_id)
+            context = _extract_action_context(body)
+            if not item:
+                _post_ephemeral(
+                    client,
+                    channel_id=context["channel_id"],
+                    user_id=context["user_id"],
+                    text="실제 발송 대상 항목을 찾지 못했습니다.",
+                )
+                return
+            try:
+                view = _build_confirm_send_modal(item)
+            except Exception as exc:
+                _post_ephemeral(
+                    client,
+                    channel_id=context["channel_id"],
+                    user_id=context["user_id"],
+                    text=f"실제 발송 미리보기를 준비하지 못했습니다: {exc}",
+                )
+                return
+            private_metadata = parse_json_value(view.get("private_metadata"), {})
+            private_metadata.update(
+                {
+                    "channel_id": context["channel_id"],
+                    "user_id": context["user_id"],
+                    "message_ts": context["message_ts"],
+                }
+            )
+            view["private_metadata"] = json.dumps(private_metadata)
+            open_modal = client.views_push if body.get("view", {}).get("id") else client.views_open
+            open_modal(trigger_id=body["trigger_id"], view=view)
 
         @app.action("approval_send_test")
         def _approval_send_test(ack: Any, body: dict[str, Any], client: Any) -> None:
             ack()
             item_id = body["actions"][0]["value"]
             item = get_approval_item(item_id)
+            context = _extract_action_context(body)
             recipient = os.environ.get("ALERT_EMAIL_TO", "").strip() or os.environ.get("SMTP_USER", "").strip()
             if not item or not recipient:
                 _post_ephemeral(
                     client,
-                    channel_id=body.get("channel", {}).get("id"),
-                    user_id=body.get("user", {}).get("id"),
+                    channel_id=context["channel_id"],
+                    user_id=context["user_id"],
                     text="테스트 메일 대상 주소 또는 승인 항목을 찾지 못했습니다.",
                 )
                 return
@@ -583,14 +737,14 @@ def ensure_slack_socket_mode_started() -> bool:
             )
             _try_add_message_reaction(
                 client,
-                channel_id=body.get("channel", {}).get("id"),
-                message_ts=body.get("message", {}).get("ts"),
+                channel_id=context["channel_id"],
+                message_ts=context["message_ts"],
                 name="email",
             )
             _post_ephemeral(
                 client,
-                channel_id=body.get("channel", {}).get("id"),
-                user_id=body.get("user", {}).get("id"),
+                channel_id=context["channel_id"],
+                user_id=context["user_id"],
                 text=f"{recipient} 로 테스트 메일을 보냈습니다.",
             )
 
@@ -599,24 +753,25 @@ def ensure_slack_socket_mode_started() -> bool:
             ack()
             item_id = body["actions"][0]["value"]
             item = get_approval_item(item_id)
+            context = _extract_action_context(body)
             if not item:
                 _post_ephemeral(
                     client,
-                    channel_id=body.get("channel", {}).get("id"),
-                    user_id=body.get("user", {}).get("id"),
+                    channel_id=context["channel_id"],
+                    user_id=context["user_id"],
                     text="PDF를 보낼 승인 항목을 찾지 못했습니다.",
                 )
                 return
             _ok, message = _send_attachment_to_user_dm(
                 client,
-                user_id=body.get("user", {}).get("id", ""),
+                user_id=context["user_id"] or "",
                 item=item,
                 asset_type="proposal_pdf",
             )
             _post_ephemeral(
                 client,
-                channel_id=body.get("channel", {}).get("id"),
-                user_id=body.get("user", {}).get("id"),
+                channel_id=context["channel_id"],
+                user_id=context["user_id"],
                 text=message,
             )
 
@@ -625,24 +780,25 @@ def ensure_slack_socket_mode_started() -> bool:
             ack()
             item_id = body["actions"][0]["value"]
             item = get_approval_item(item_id)
+            context = _extract_action_context(body)
             if not item:
                 _post_ephemeral(
                     client,
-                    channel_id=body.get("channel", {}).get("id"),
-                    user_id=body.get("user", {}).get("id"),
+                    channel_id=context["channel_id"],
+                    user_id=context["user_id"],
                     text="Word 파일을 보낼 승인 항목을 찾지 못했습니다.",
                 )
                 return
             _ok, message = _send_attachment_to_user_dm(
                 client,
-                user_id=body.get("user", {}).get("id", ""),
+                user_id=context["user_id"] or "",
                 item=item,
                 asset_type="proposal_docx",
             )
             _post_ephemeral(
                 client,
-                channel_id=body.get("channel", {}).get("id"),
-                user_id=body.get("user", {}).get("id"),
+                channel_id=context["channel_id"],
+                user_id=context["user_id"],
                 text=message,
             )
 
@@ -651,11 +807,12 @@ def ensure_slack_socket_mode_started() -> bool:
             ack()
             item_id = body["actions"][0]["value"]
             item = get_approval_item(item_id)
+            context = _extract_action_context(body)
             if not item:
                 _post_ephemeral(
                     client,
-                    channel_id=body.get("channel", {}).get("id"),
-                    user_id=body.get("user", {}).get("id"),
+                    channel_id=context["channel_id"],
+                    user_id=context["user_id"],
                     text="보완 요청 대상 항목을 찾지 못했습니다.",
                 )
                 return
@@ -663,9 +820,9 @@ def ensure_slack_socket_mode_started() -> bool:
             private_metadata = json.dumps(
                 {
                     "item_id": item_id,
-                    "channel_id": body.get("channel", {}).get("id"),
-                    "user_id": body.get("user", {}).get("id"),
-                    "message_ts": body.get("message", {}).get("ts"),
+                    "channel_id": context["channel_id"],
+                    "user_id": context["user_id"],
+                    "message_ts": context["message_ts"],
                 }
             )
             open_modal = client.views_push if body.get("view", {}).get("id") else client.views_open
@@ -728,6 +885,34 @@ def ensure_slack_socket_mode_started() -> bool:
                     "message_ts": metadata.get("message_ts"),
                 },
                 name=f"slack-request-changes-{item['id'][:8]}",
+                daemon=True,
+            ).start()
+
+        @app.view("approval_confirm_send_modal")
+        def _approval_confirm_send_modal(ack: Any, body: dict[str, Any], client: Any, view: dict[str, Any]) -> None:
+            ack()
+            metadata = parse_json_value(view.get("private_metadata"), {})
+            item = get_approval_item(metadata.get("item_id", ""))
+            if not item:
+                _post_ephemeral(
+                    client,
+                    channel_id=metadata.get("channel_id"),
+                    user_id=metadata.get("user_id"),
+                    text="실제 발송 대상 항목을 찾지 못했습니다.",
+                )
+                return
+
+            threading.Thread(
+                target=_handle_approve_and_send_async,
+                kwargs={
+                    "client": client,
+                    "item": item,
+                    "reviewer_identity": body.get("user", {}).get("username") or body.get("user", {}).get("id", ""),
+                    "channel_id": metadata.get("channel_id"),
+                    "user_id": metadata.get("user_id"),
+                    "message_ts": metadata.get("message_ts"),
+                },
+                name=f"slack-approve-send-{item['id'][:8]}",
                 daemon=True,
             ).start()
 

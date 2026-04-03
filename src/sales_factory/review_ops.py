@@ -114,6 +114,83 @@ def send_test_outbound_email(
     )
 
 
+def build_live_send_preview(item: dict[str, Any]) -> dict[str, Any]:
+    metadata = parse_json_value(item.get("metadata_json"), {})
+    auto_delivery = parse_json_value(metadata.get("auto_delivery"), {})
+    asset_rows = load_approval_assets(item)
+    subject, body, attachments = build_primary_email_payload(asset_rows)
+    run_row = get_run(item["run_id"]) or {}
+    recipient = str(auto_delivery.get("recipient_email") or auto_delivery.get("recipient") or "").strip()
+    blocked_reasons = [str(reason) for reason in (auto_delivery.get("blocked_reasons") or []) if str(reason).strip()]
+    return {
+        "company_name": item.get("company_name") or item.get("title") or item.get("id"),
+        "recipient": recipient,
+        "subject": subject,
+        "body": body,
+        "attachments": attachments,
+        "attachment_names": [path.name for path in attachments],
+        "blocked_reasons": blocked_reasons,
+        "test_mode": bool(run_row.get("test_mode", 1)),
+    }
+
+
+def approve_and_send_approval_item(
+    item: dict[str, Any],
+    *,
+    reviewer_note: str = "",
+    reviewer_identity: str = "",
+) -> tuple[bool, str]:
+    preview = build_live_send_preview(item)
+    recipient = str(preview.get("recipient") or "").strip()
+    if not recipient:
+        return False, "실제 발송 대상 이메일을 찾지 못했습니다."
+
+    subject = str(preview["subject"])
+    body = str(preview["body"])
+    attachments = list(preview["attachments"])
+    send_email_message(
+        subject=subject,
+        body_text=body,
+        to_email=recipient,
+        attachment_paths=attachments,
+    )
+
+    metadata = parse_json_value(item.get("metadata_json"), {})
+    if reviewer_note.strip():
+        metadata["reviewer_note"] = reviewer_note.strip()
+    if reviewer_identity.strip():
+        metadata["reviewed_via"] = "slack"
+        metadata["reviewer_identity"] = reviewer_identity.strip()
+    metadata["manual_delivery"] = {
+        "status": "sent",
+        "recipient": recipient,
+        "subject": subject,
+        "attachments": [str(path) for path in attachments],
+        "sent_at": now_iso(),
+    }
+
+    update_approval_item(
+        item["id"],
+        status="approved",
+        decided_at=now_iso(),
+        metadata_json=metadata,
+    )
+    finalize_run_review_state(item["run_id"])
+    record_notification(
+        item["run_id"],
+        "manual_outbound_email",
+        "sent",
+        subject,
+        recipient,
+        {
+            "company_name": item.get("company_name"),
+            "attachments": [str(path) for path in attachments],
+            "approval_item_id": item["id"],
+        },
+    )
+    return True, f"{recipient} 로 실제 발송을 완료했습니다."
+
+
 def launch_rework_for_approval(item: dict[str, Any], reason: str) -> tuple[bool, str]:
     running = query_running_run()
     if running:

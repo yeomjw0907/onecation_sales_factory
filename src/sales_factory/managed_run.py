@@ -13,6 +13,7 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from sales_factory.crew import SalesFactory
@@ -72,6 +73,8 @@ MODEL_PRICING_USD_PER_MILLION: dict[str, tuple[float, float]] = {
 
 LLM_RETRY_ATTEMPTS = 3
 LLM_RETRY_BASE_DELAY_SECONDS = 5
+QUALITY_AUTO_REWORK_MAX_ATTEMPTS = max(0, int(os.environ.get("SALES_FACTORY_QUALITY_REWORK_MAX_ATTEMPTS", "2") or 2))
+QUALITY_AUTO_REWORK_MIN_SCORE = max(0, int(os.environ.get("SALES_FACTORY_QUALITY_REWORK_MIN_SCORE", "90") or 90))
 RETRYABLE_LLM_ERROR_PATTERNS = (
     "503",
     "429",
@@ -126,6 +129,155 @@ def evaluate_proposal_asset(asset_row: dict[str, Any]) -> dict[str, Any]:
     if text == "(file missing)":
         return evaluate_proposal_path(asset_path)
     return evaluate_proposal_text(text)
+
+
+def build_quality_rework_feedback(
+    *,
+    company_name: str,
+    proposal_quality: dict[str, Any],
+    validation_issues: list[str],
+    attempt: int,
+) -> str:
+    feedback_lines = [
+        f"Internal QA rework attempt {attempt} for {company_name}.",
+        "Fix every issue below before finalizing the proposal and outbound email.",
+    ]
+    score = int(proposal_quality.get("score", 0) or 0)
+    if score < QUALITY_AUTO_REWORK_MIN_SCORE:
+        feedback_lines.append(
+            f"- Raise proposal quality from {score} to at least {QUALITY_AUTO_REWORK_MIN_SCORE}."
+        )
+    for issue in validation_issues[:6]:
+        feedback_lines.append(f"- {issue}")
+    feedback_lines.append("- Do not leave placeholders, mismatched geography, or customer-facing audit error text.")
+    feedback_lines.append("- Preserve the exact company identity and keep all claims aligned with verified upstream facts.")
+    return "\n".join(feedback_lines)
+
+
+def should_queue_quality_rework(
+    *,
+    proposal_quality: dict[str, Any],
+    validation_issues: list[str],
+    attempt: int,
+) -> bool:
+    if attempt >= QUALITY_AUTO_REWORK_MAX_ATTEMPTS:
+        return False
+    score = int(proposal_quality.get("score", 0) or 0)
+    if score < QUALITY_AUTO_REWORK_MIN_SCORE:
+        return True
+    return bool(validation_issues)
+
+
+def launch_quality_rework_run(
+    *,
+    source_args: argparse.Namespace,
+    company_name: str,
+    feedback: str,
+    attempt: int,
+) -> None:
+    rework_args = SimpleNamespace(
+        trigger_source="quality_auto_rework",
+        target_country=source_args.target_country,
+        lead_mode="company_name",
+        lead_query=company_name,
+        max_companies=1,
+        notify_email=source_args.notify_email,
+        proposal_language=source_args.proposal_language,
+        currency=source_args.currency,
+        segment_id=getattr(source_args, "segment_id", "") or "",
+        segment_label=getattr(source_args, "segment_label", "") or "",
+        segment_brief=getattr(source_args, "segment_brief", "") or "",
+        log_path="",
+        test_mode=bool(source_args.test_mode),
+        quality_rework_feedback=feedback,
+        quality_rework_attempt=attempt,
+    )
+
+    def _run_in_background() -> None:
+        try:
+            run_managed(rework_args)
+        except Exception:
+            record_notification(
+                None,
+                "quality_rework",
+                "failed",
+                f"Quality rework failed for {company_name}",
+                source_args.notify_email or "",
+                {"attempt": attempt, "traceback": traceback.format_exc()},
+            )
+
+    threading.Thread(
+        target=_run_in_background,
+        name=f"quality-rework-{datetime.now().strftime('%H%M%S')}",
+        daemon=True,
+    ).start()
+
+
+def queue_quality_rework_candidates(
+    *,
+    run_id: str,
+    company_assets: dict[str, list[str]],
+    validation_issues: dict[str, list[str]],
+    args: argparse.Namespace,
+) -> tuple[dict[str, list[str]], dict[str, list[str]], dict[str, Any]]:
+    filtered_assets: dict[str, list[str]] = {}
+    filtered_issues: dict[str, list[str]] = {}
+    queued: list[dict[str, Any]] = []
+    current_attempt = int(getattr(args, "quality_rework_attempt", 0) or 0)
+
+    for company_name, asset_ids in sorted(company_assets.items()):
+        asset_rows = list_assets_by_ids(asset_ids)
+        proposal_asset = next((row for row in asset_rows if row.get("asset_type") == "proposal"), None)
+        proposal_quality = evaluate_proposal_asset(proposal_asset) if proposal_asset else {"score": 0, "label": "파일 없음"}
+        company_issue_list = list(validation_issues.get(company_name, []))
+        next_attempt = current_attempt + 1
+
+        if should_queue_quality_rework(
+            proposal_quality=proposal_quality,
+            validation_issues=company_issue_list,
+            attempt=current_attempt,
+        ):
+            feedback = build_quality_rework_feedback(
+                company_name=company_name,
+                proposal_quality=proposal_quality,
+                validation_issues=company_issue_list,
+                attempt=next_attempt,
+            )
+            launch_quality_rework_run(
+                source_args=args,
+                company_name=company_name,
+                feedback=feedback,
+                attempt=next_attempt,
+            )
+            record_notification(
+                run_id,
+                "quality_rework",
+                "queued",
+                f"Auto quality rework queued for {company_name}",
+                args.notify_email or "",
+                {
+                    "company_name": company_name,
+                    "attempt": next_attempt,
+                    "proposal_score": int(proposal_quality.get("score", 0) or 0),
+                    "issues": company_issue_list,
+                    "feedback": feedback,
+                },
+            )
+            queued.append(
+                {
+                    "company_name": company_name,
+                    "attempt": next_attempt,
+                    "proposal_score": int(proposal_quality.get("score", 0) or 0),
+                    "issues": company_issue_list,
+                }
+            )
+            continue
+
+        filtered_assets[company_name] = asset_ids
+        if company_issue_list:
+            filtered_issues[company_name] = company_issue_list
+
+    return filtered_assets, filtered_issues, {"queued_count": len(queued), "items": queued}
 
 
 def normalize_model_name(model_name: str | None) -> str | None:
@@ -277,6 +429,8 @@ def build_inputs(args: argparse.Namespace) -> dict[str, Any]:
         "segment_id": getattr(args, "segment_id", "") or "",
         "segment_label": getattr(args, "segment_label", "") or "",
         "segment_brief": getattr(args, "segment_brief", "") or "",
+        "quality_rework_feedback": getattr(args, "quality_rework_feedback", "") or "",
+        "quality_rework_attempt": str(int(getattr(args, "quality_rework_attempt", 0) or 0)),
         "alert_email_to": args.notify_email,
         "test_mode": args.test_mode,
         "auto_mode": strategy_snapshot["auto_mode"],
@@ -1042,6 +1196,12 @@ def run_managed(args: argparse.Namespace) -> str:
             output_dir=output_dir,
             proposal_language=inputs.get("proposal_language"),
         )
+        company_assets, validation_issues, quality_rework_summary = queue_quality_rework_candidates(
+            run_id=run_id,
+            company_assets=company_assets,
+            validation_issues=validation_issues,
+            args=args,
+        )
         for company_name, issues in sorted(validation_issues.items()):
             record_notification(
                 run_id,
@@ -1080,6 +1240,7 @@ def run_managed(args: argparse.Namespace) -> str:
         ):
             final_status = "auto_sent"
         run_metadata["auto_delivery_summary"] = auto_delivery_summary
+        run_metadata["quality_rework_summary"] = quality_rework_summary
         update_run(
             run_id,
             status=final_status,
@@ -1122,6 +1283,11 @@ def run_managed(args: argparse.Namespace) -> str:
                 f"✅ 파이프라인 완료 — 검토 대기 {approval_count}건 | 국가: {args.target_country} | "
                 f"비용: ${estimated_cost:.4f} | ID: {run_id[:8]}",
                 blocks=slack_blocks,
+            )
+        elif int(quality_rework_summary.get("queued_count") or 0) > 0:
+            send_slack_message(
+                f"🔄 품질 자동 재작업 {quality_rework_summary['queued_count']}건 진행 중 | 국가: {args.target_country} | "
+                f"통과본만 다시 공유합니다. | ID: {run_id[:8]}"
             )
         else:
             send_slack_message(
@@ -1169,6 +1335,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--segment-id", default="")
     parser.add_argument("--segment-label", default="")
     parser.add_argument("--segment-brief", default="")
+    parser.add_argument("--quality-rework-feedback", default="")
+    parser.add_argument("--quality-rework-attempt", type=int, default=0)
     parser.add_argument("--log-path", default="")
     parser.add_argument("--notify-email", default="")
     parser.add_argument("--test-mode", action="store_true", default=False)
