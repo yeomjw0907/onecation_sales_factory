@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import html
 import json
 import os
@@ -194,6 +195,18 @@ AUTO_SEND_MODE_LABELS = {
     "canary": "카나리 테스트",
     "live": "자동 발송",
 }
+
+OUTBOUND_NOTIFICATION_KIND_LABELS = {
+    "auto_delivery": "자동 발송",
+    "test_outbound_email": "테스트 발송",
+}
+
+REVIEW_NOTE_TEMPLATES: list[tuple[str, str]] = [
+    ("성과 보강", "성과 근거와 실제 수치를 더 보강해 주세요. Why us와 핵심 제안 근거가 약합니다."),
+    ("가격 정리", "가격과 범위 표현을 더 명확하게 정리해 주세요. 제공 범위가 한눈에 보여야 합니다."),
+    ("메일 톤 조정", "메일 제목과 본문 톤을 더 간결하고 자연스럽게 다듬어 주세요. 첫 문장 압축이 필요합니다."),
+    ("현지화 수정", "현지 시장 표현과 업계 문맥을 더 자연스럽게 맞춰 주세요. 번역투 표현을 줄여야 합니다."),
+]
 
 STRATEGY_BIAS_LABELS = {
     "general_digital_recovery": "기본 디지털 회복형",
@@ -969,20 +982,20 @@ def inject_app_shell_styles() -> None:
     st.markdown(
         """
         <style>
-        @import url("https://fonts.bunny.net/css?family=dm-sans:300,400,500,600,700&display=swap");
+        @import url("https://fonts.bunny.net/css?family=inter:300,400,500,600,700&display=swap");
         @import url("https://cdn.jsdelivr.net/npm/geist@1.3.0/dist/fonts/geist-mono/style.css");
 
         :root {
             color-scheme: light dark;
-            --sf-native-bg:      var(--background-color, #0c0c0c);
-            --sf-native-surface: var(--secondary-background-color, #141414);
-            --sf-native-text:    var(--text-color, #ededed);
+            --sf-native-bg:      var(--background-color, #0d0d0f);
+            --sf-native-surface: var(--secondary-background-color, #121317);
+            --sf-native-text:    var(--text-color, #f3f4f6);
             --sf-native-accent:  var(--primary-color, #3b82f6);
 
             --sf-bg:           var(--sf-native-bg);
             --sf-surface:      var(--sf-native-surface);
-            --sf-panel:        color-mix(in srgb, var(--sf-native-surface) 82%, var(--sf-native-bg) 18%);
-            --sf-panel-strong: color-mix(in srgb, var(--sf-native-surface) 70%, var(--sf-native-text) 12%);
+            --sf-panel:        color-mix(in srgb, var(--sf-native-surface) 88%, var(--sf-native-bg) 12%);
+            --sf-panel-strong: color-mix(in srgb, var(--sf-native-surface) 92%, var(--sf-native-text) 8%);
             --sf-border:       color-mix(in srgb, var(--sf-native-text) 10%, transparent);
             --sf-border-md:    color-mix(in srgb, var(--sf-native-text) 16%, transparent);
             --sf-border-str:   color-mix(in srgb, var(--sf-native-text) 24%, transparent);
@@ -1001,11 +1014,11 @@ def inject_app_shell_styles() -> None:
             --sf-chip-bg:      color-mix(in srgb, var(--sf-native-text) 7%, transparent);
             --sf-chip-border:  color-mix(in srgb, var(--sf-native-text) 14%, transparent);
             --sf-chip-text:    color-mix(in srgb, var(--sf-native-text) 72%, var(--sf-native-bg));
-            --sf-shadow:       0 8px 24px color-mix(in srgb, var(--sf-native-bg) 70%, transparent);
+            --sf-shadow:       none;
         }
 
         html, body, [class*="css"] {
-            font-family: "DM Sans", system-ui, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
+            font-family: "Inter", system-ui, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
             color: var(--sf-text);
             background: var(--sf-bg);
             -webkit-font-smoothing: antialiased;
@@ -1040,18 +1053,18 @@ def inject_app_shell_styles() -> None:
         }
 
         div[data-testid="stVerticalBlockBorderWrapper"] {
-            border-radius: 8px;
+            border-radius: 6px;
             border-color: var(--sf-border-md);
-            background: var(--sf-panel);
+            background: transparent;
             box-shadow: none;
         }
 
         div[data-testid="stMetric"] {
             background: var(--sf-panel);
             border: 1px solid var(--sf-border-md);
-            border-radius: 8px;
-            padding: 16px 18px;
-            min-height: 100px;
+            border-radius: 6px;
+            padding: 14px 16px;
+            min-height: 92px;
         }
 
         div[data-testid="stMetricLabel"] {
@@ -1072,7 +1085,7 @@ def inject_app_shell_styles() -> None:
             gap: 0;
             border-bottom: 1px solid var(--sf-border);
             padding-bottom: 0;
-            background: var(--sf-surface);
+            background: transparent;
         }
 
         .stTabs [data-baseweb="tab"] {
@@ -1090,9 +1103,9 @@ def inject_app_shell_styles() -> None:
         }
 
         [data-testid="stExpander"] details {
-            border-radius: 8px;
+            border-radius: 6px;
             border: 1px solid var(--sf-border-md);
-            background: var(--sf-panel);
+            background: transparent;
         }
 
         [data-testid="stExpander"] summary p {
@@ -1104,7 +1117,7 @@ def inject_app_shell_styles() -> None:
         h1, h2, h3 {
             letter-spacing: -0.03em;
             color: var(--sf-text);
-            font-family: "DM Sans", sans-serif;
+            font-family: "Inter", system-ui, sans-serif;
         }
 
         h1 { font-size: clamp(1.8rem, 3vw, 2.4rem); margin-bottom: 0.2rem; }
@@ -1158,7 +1171,80 @@ def inject_app_shell_styles() -> None:
         p, li, label { color: var(--sf-text); font-size: 13px; }
         small, .stCaption { color: var(--sf-muted) !important; font-size: 11px !important; }
 
-        [data-testid="stDataFrame"] { border-radius: 8px; overflow: hidden; }
+        [data-testid="stDataFrame"] { border-radius: 6px; overflow: hidden; }
+
+        .sf-pill {
+            display:inline-flex;
+            align-items:center;
+            gap:6px;
+            padding:4px 10px;
+            border-radius:999px;
+            border:1px solid var(--sf-chip-border);
+            font-size:12px;
+            font-weight:600;
+            white-space:nowrap;
+        }
+
+        .sf-spin-dot {
+            width:10px;
+            height:10px;
+            border-radius:999px;
+            border:2px solid currentColor;
+            border-top-color: transparent;
+            display:inline-block;
+            animation: sf-spin 0.9s linear infinite;
+        }
+
+        .sf-row {
+            display:flex;
+            align-items:flex-start;
+            gap:12px;
+            padding:12px 10px;
+            border-bottom:1px solid var(--sf-border);
+        }
+
+        .sf-row-accent {
+            width:3px;
+            min-width:3px;
+            border-radius:999px;
+            align-self:stretch;
+            opacity:0.9;
+        }
+
+        .sf-row-body {
+            min-width:0;
+            flex:1;
+        }
+
+        .sf-row-title {
+            font-size:13px;
+            font-weight:600;
+            color:var(--sf-text);
+            line-height:1.45;
+        }
+
+        .sf-row-subtitle {
+            margin-top:3px;
+            font-size:12px;
+            color:var(--sf-muted);
+            line-height:1.45;
+        }
+
+        .sf-row-meta {
+            margin-top:5px;
+            font-size:11px;
+            color:var(--sf-dim);
+            line-height:1.45;
+        }
+
+        .sf-row-side {
+            padding-top:2px;
+        }
+
+        @keyframes sf-spin {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -1490,6 +1576,443 @@ def build_downloadable_asset_payload(asset_row: dict[str, Any]) -> dict[str, Any
         "mime": mime,
         "data": data,
     }
+
+
+def render_safe_download_button(
+    payload: dict[str, Any],
+    *,
+    key: str,
+    use_container_width: bool = True,
+) -> None:
+    kwargs = {
+        "label": payload["label"],
+        "data": payload["data"],
+        "file_name": payload["file_name"],
+        "mime": payload["mime"],
+        "key": key,
+        "use_container_width": use_container_width,
+    }
+    try:
+        st.download_button(on_click="ignore", **kwargs)
+    except TypeError:
+        st.download_button(**kwargs)
+
+
+def build_status_pill_html(
+    label: str,
+    *,
+    tone: str = "neutral",
+    spinning: bool = False,
+) -> str:
+    tone_map = {
+        "neutral": ("var(--sf-chip-bg)", "var(--sf-chip-text)", "var(--sf-chip-border)"),
+        "blue": ("var(--sf-accent-soft)", "var(--sf-accent)", "color-mix(in srgb, var(--sf-accent) 28%, transparent)"),
+        "green": ("var(--sf-green-soft)", "var(--sf-green)", "color-mix(in srgb, var(--sf-green) 28%, transparent)"),
+        "amber": ("var(--sf-amber-soft)", "var(--sf-amber)", "color-mix(in srgb, var(--sf-amber) 28%, transparent)"),
+        "red": ("var(--sf-red-soft)", "var(--sf-red)", "color-mix(in srgb, var(--sf-red) 28%, transparent)"),
+    }
+    background, color, border = tone_map.get(tone, tone_map["neutral"])
+    spinner = "<span class='sf-spin-dot'></span>" if spinning else ""
+    return (
+        f"<span class='sf-pill sf-pill--{tone}' "
+        f"style='background:{background};color:{color};border-color:{border};'>"
+        f"{spinner}{html.escape(label)}</span>"
+    )
+
+
+def render_compact_row(
+    *,
+    title: str,
+    subtitle: str = "",
+    meta: str = "",
+    pill_html: str = "",
+    accent_tone: str = "neutral",
+) -> None:
+    accent_colors = {
+        "neutral": "var(--sf-border-md)",
+        "blue": "var(--sf-accent)",
+        "green": "var(--sf-green)",
+        "amber": "var(--sf-amber)",
+        "red": "var(--sf-red)",
+    }
+    accent = accent_colors.get(accent_tone, accent_colors["neutral"])
+    subtitle_html = f"<div class='sf-row-subtitle'>{html.escape(subtitle)}</div>" if subtitle else ""
+    meta_html = f"<div class='sf-row-meta'>{html.escape(meta)}</div>" if meta else ""
+    st.markdown(
+        f"""
+        <div class="sf-row">
+            <div class="sf-row-accent" style="background:{accent};"></div>
+            <div class="sf-row-body">
+                <div class="sf-row-title">{html.escape(title)}</div>
+                {subtitle_html}
+                {meta_html}
+            </div>
+            <div class="sf-row-side">{pill_html}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def build_rework_state_lookup(items: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    item_ids = {str(item.get("id")) for item in items if item.get("id")}
+    if not item_ids:
+        return {}
+
+    latest_by_item: dict[str, dict[str, Any]] = {}
+    for row in list_notifications(limit=200):
+        if str(row.get("kind") or "") != "rework_run":
+            continue
+        metadata = parse_json_field(row.get("metadata_json"), {})
+        item_id = str(metadata.get("approval_item_id") or "")
+        if item_id not in item_ids:
+            continue
+        existing = latest_by_item.get(item_id)
+        if not existing or str(row.get("created_at") or "") > str(existing.get("created_at") or ""):
+            latest_by_item[item_id] = row
+
+    running_run = query_running_run()
+    running_rework = bool(running_run and str(running_run.get("trigger_source") or "").startswith("approval_rework"))
+    active_item_id = ""
+    if running_rework and latest_by_item:
+        active_item_id = max(
+            latest_by_item.items(),
+            key=lambda pair: str(pair[1].get("created_at") or ""),
+        )[0]
+
+    lookup: dict[str, dict[str, Any]] = {}
+    for item_id in item_ids:
+        if item_id == active_item_id:
+            lookup[item_id] = {"label": "재작업 중", "tone": "blue", "spinning": True}
+        elif item_id in latest_by_item:
+            lookup[item_id] = {"label": "재작업 요청됨", "tone": "amber", "spinning": False}
+    return lookup
+
+
+def tone_for_status(status: str | None) -> str:
+    normalized = str(status or "").lower()
+    if normalized in {"sent", "auto_sent", "running"}:
+        return "blue"
+    if normalized in {"approved", "completed"}:
+        return "green"
+    if normalized in {"waiting_approval", "queued", "pending"}:
+        return "amber"
+    if normalized in {"failed", "blocked", "rejected"}:
+        return "red"
+    return "neutral"
+
+
+def render_pdf_preview(asset_row: dict[str, Any], *, key_prefix: str, height: int = 560) -> None:
+    payload = build_downloadable_asset_payload(asset_row)
+    if not payload:
+        st.info("PDF 미리보기를 불러오지 못했습니다.")
+        return
+
+    encoded = base64.b64encode(payload["data"]).decode("ascii")
+    st.markdown(
+        (
+            f'<iframe title="{html.escape(payload["file_name"])}" '
+            f'src="data:application/pdf;base64,{encoded}" '
+            f'width="100%" height="{height}" '
+            'style="border:1px solid var(--sf-border-md);border-radius:12px;background:var(--sf-panel);"></iframe>'
+        ),
+        unsafe_allow_html=True,
+    )
+
+
+def build_runtime_version_info() -> dict[str, str]:
+    raw_commit = (
+        os.environ.get("RENDER_GIT_COMMIT")
+        or os.environ.get("GIT_COMMIT")
+        or os.environ.get("COMMIT_SHA")
+        or ""
+    ).strip()
+    raw_branch = (os.environ.get("RENDER_GIT_BRANCH") or os.environ.get("GIT_BRANCH") or "").strip()
+
+    if not raw_commit:
+        try:
+            raw_commit = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=str(PROJECT_ROOT),
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+        except Exception:
+            raw_commit = ""
+
+    if not raw_branch:
+        try:
+            raw_branch = subprocess.run(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                cwd=str(PROJECT_ROOT),
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+        except Exception:
+            raw_branch = ""
+
+    build_time = datetime.fromtimestamp(Path(__file__).stat().st_mtime).isoformat(timespec="seconds")
+    return {
+        "environment": "Render" if is_render_environment() else "Local",
+        "commit": raw_commit[:7] if raw_commit else "-",
+        "branch": raw_branch or "-",
+        "build_time": format_local_datetime(build_time),
+        "service": os.environ.get("RENDER_SERVICE_NAME", "").strip() or "-",
+    }
+
+
+def build_delivery_archive_rows(selected_date: date, *, limit: int = 400) -> list[dict[str, Any]]:
+    notifications = filter_rows_by_date(list_notifications(limit=limit), "created_at", selected_date)
+    run_cache: dict[str, dict[str, Any] | None] = {}
+    rows: list[dict[str, Any]] = []
+
+    for row in notifications:
+        kind = str(row.get("kind") or "")
+        if kind not in OUTBOUND_NOTIFICATION_KIND_LABELS:
+            continue
+        run_id = str(row.get("run_id") or "")
+        if run_id not in run_cache:
+            run_cache[run_id] = get_run(run_id) if run_id else None
+        run_row = run_cache.get(run_id) or {}
+        metadata = parse_json_field(row.get("metadata_json"), {})
+        rows.append(
+            {
+                "created_at": row.get("created_at"),
+                "status": str(row.get("status") or ""),
+                "status_label": display_status(row.get("status")),
+                "kind": kind,
+                "kind_label": OUTBOUND_NOTIFICATION_KIND_LABELS.get(kind, kind),
+                "subject": row.get("subject") or "-",
+                "recipient": row.get("recipient") or "-",
+                "company_name": metadata.get("company_name") or "-",
+                "segment_label": get_run_segment_label(run_row),
+                "country_label": display_country(run_row.get("target_country")),
+                "mode": metadata.get("mode") or "-",
+                "attachments": [Path(str(path)).name for path in (metadata.get("attachments") or [])],
+            }
+        )
+
+    return rows
+
+
+def summarize_delivery_archive(rows: list[dict[str, Any]]) -> dict[str, int]:
+    return {
+        "total": len(rows),
+        "sent": sum(1 for row in rows if row.get("status") == "sent"),
+        "blocked": sum(1 for row in rows if row.get("status") == "blocked"),
+        "failed": sum(1 for row in rows if row.get("status") == "failed"),
+        "tests": sum(1 for row in rows if row.get("kind") == "test_outbound_email"),
+    }
+
+
+def build_daily_delivery_rollup(*, days: int = 14, limit: int = 600) -> list[dict[str, Any]]:
+    rows = [row for row in list_notifications(limit=limit) if str(row.get("kind") or "") in OUTBOUND_NOTIFICATION_KIND_LABELS]
+    daily: dict[str, dict[str, Any]] = {}
+    cutoff = date.today() - timedelta(days=max(0, days - 1))
+    for row in rows:
+        row_date = parse_iso_date(row.get("created_at"))
+        if not row_date or row_date < cutoff:
+            continue
+        key = row_date.isoformat()
+        bucket = daily.setdefault(
+            key,
+            {"date": row_date, "total": 0, "sent": 0, "blocked": 0, "failed": 0, "tests": 0},
+        )
+        bucket["total"] += 1
+        if row.get("status") == "sent":
+            bucket["sent"] += 1
+        if row.get("status") == "blocked":
+            bucket["blocked"] += 1
+        if row.get("status") == "failed":
+            bucket["failed"] += 1
+        if row.get("kind") == "test_outbound_email":
+            bucket["tests"] += 1
+
+    return [
+        {
+            "날짜": format_local_date(bucket["date"]),
+            "발송 기록": bucket["total"],
+            "sent": bucket["sent"],
+            "blocked": bucket["blocked"],
+            "failed": bucket["failed"],
+            "test": bucket["tests"],
+        }
+        for bucket in sorted(daily.values(), key=lambda item: item["date"], reverse=True)
+    ]
+
+
+def build_approval_item_context(item: dict[str, Any]) -> dict[str, Any]:
+    metadata = parse_json_field(item.get("metadata_json"), {})
+    asset_rows = load_approval_assets(item)
+    proposal_asset = next((row for row in asset_rows if row.get("asset_type") == "proposal"), None)
+    quality = evaluate_proposal_asset(proposal_asset) if proposal_asset else None
+    run_row = get_run(str(item.get("run_id") or "")) or {}
+    downloadable_assets = [row for row in asset_rows if row.get("asset_type") in {"proposal_pdf", "proposal_docx"}]
+    pdf_asset = next((row for row in downloadable_assets if row.get("asset_type") == "proposal_pdf"), None)
+    return {
+        "item": item,
+        "metadata": metadata,
+        "asset_rows": asset_rows,
+        "proposal_asset": proposal_asset,
+        "quality": quality,
+        "run_row": run_row,
+        "segment_label": get_run_segment_label(run_row),
+        "country_label": display_country(run_row.get("target_country")),
+        "email_preview": build_review_email_preview(asset_rows),
+        "downloadable_assets": downloadable_assets,
+        "pdf_asset": pdf_asset,
+        "validation_issues": metadata.get("validation_issues") or [],
+        "auto_delivery": parse_json_field(metadata.get("auto_delivery"), {}),
+        "urgent": is_urgent_approval_item(item),
+        "priority": int(item.get("priority", 0) or 0),
+        "quality_score": int((quality or {}).get("score", 0) or 0),
+    }
+
+
+def render_review_asset_preview(context: dict[str, Any], *, key_prefix: str) -> None:
+    asset_rows = context["asset_rows"]
+    downloadable_assets = context["downloadable_assets"]
+    email_preview = context["email_preview"]
+
+    if not asset_rows:
+        st.info("연결된 산출물이 없습니다.")
+        return
+
+    st.dataframe(
+        [
+            {
+                "종류": display_asset_type(row["asset_type"]),
+                "이름": row["title"],
+                "파일": Path(str(row["path"])).name,
+            }
+            for row in asset_rows
+        ],
+        hide_index=True,
+        use_container_width=True,
+    )
+
+    action_cols = st.columns(2)
+    with action_cols[0]:
+        st.markdown("**제안서 바로 확인**")
+        if downloadable_assets:
+            for asset_row in downloadable_assets:
+                payload = build_downloadable_asset_payload(asset_row)
+                if payload:
+                    render_safe_download_button(
+                        payload,
+                        key=f"{key_prefix}_download_{asset_row['asset_type']}",
+                        use_container_width=True,
+                    )
+        else:
+            st.caption("다운로드 가능한 제안서 파일이 없습니다.")
+
+    with action_cols[1]:
+        st.markdown("**메일 첨부 안내**")
+        if email_preview and email_preview["attachment_names"]:
+            st.caption(", ".join(email_preview["attachment_names"]))
+        else:
+            st.caption("첨부 파일 정보가 아직 없습니다.")
+
+    pdf_asset = context.get("pdf_asset")
+    if pdf_asset:
+        with st.expander("PDF 미리보기", expanded=False):
+            render_pdf_preview(pdf_asset, key_prefix=f"{key_prefix}_pdf")
+
+    if email_preview:
+        st.markdown("**발송 메일 미리보기**")
+        st.text_input(
+            "메일 제목",
+            value=email_preview["subject"],
+            disabled=True,
+            key=f"{key_prefix}_email_subject",
+        )
+        st.text_area(
+            "메일 본문",
+            value=email_preview["body"],
+            height=240,
+            disabled=True,
+            key=f"{key_prefix}_email_body",
+        )
+
+
+def render_review_action_panel(
+    context: dict[str, Any],
+    *,
+    test_recipient: str,
+    note_key: str,
+    action_prefix: str,
+) -> None:
+    item = context["item"]
+    metadata = context["metadata"]
+    asset_rows = context["asset_rows"]
+
+    st.caption("빠른 메모 템플릿")
+    template_columns = st.columns(len(REVIEW_NOTE_TEMPLATES))
+    for index, (label, template_text) in enumerate(REVIEW_NOTE_TEMPLATES):
+        if template_columns[index].button(label, key=f"{action_prefix}_template_{index}", use_container_width=True):
+            st.session_state[note_key] = template_text
+            st.rerun()
+
+    reviewer_note = st.text_area(
+        "보완 / 승인 메모",
+        key=note_key,
+        placeholder="예: 이대로 진행 가능 / 성과 근거 더 보강 / 메일 첫 문장 압축 필요",
+    )
+    c1, c2, c3 = st.columns(3)
+
+    if c1.button("테스트 메일 보내기", key=f"{action_prefix}_send_test", use_container_width=True):
+        try:
+            send_test_outbound_email(
+                run_id=item["run_id"],
+                company_name=item.get("company_name") or "",
+                asset_rows=asset_rows,
+                recipient=test_recipient,
+            )
+            st.success(f"{test_recipient}로 테스트 메일을 보냈습니다.")
+        except Exception as exc:
+            record_notification(
+                item["run_id"],
+                "test_outbound_email",
+                "failed",
+                f"[TEST] {item['title']}",
+                test_recipient,
+                {"company_name": item.get("company_name"), "error": str(exc)},
+            )
+            st.error(str(exc))
+
+    if c2.button("승인", key=f"{action_prefix}_approve", use_container_width=True):
+        updated_metadata = {**metadata, "reviewer_note": reviewer_note.strip()}
+        update_approval_item(
+            item["id"],
+            status="approved",
+            decided_at=now_iso(),
+            metadata_json=updated_metadata,
+        )
+        finalize_run_review_state(item["run_id"])
+        set_ui_notice("success", "승인 처리했습니다.")
+        st.rerun()
+
+    if c3.button("반려 후 재작업", key=f"{action_prefix}_reject", use_container_width=True):
+        reason = reviewer_note.strip()
+        if not reason:
+            st.warning("반려 사유를 먼저 적어주세요.")
+        else:
+            reroute = route_rejection(metadata.get("asset_type", "proposal_package"), reason)
+            updated_metadata = {**metadata, "reviewer_note": reason}
+            update_approval_item(
+                item["id"],
+                status="rejected",
+                decided_at=now_iso(),
+                rejection_reason=reason,
+                reroute_targets_json=reroute,
+                metadata_json=updated_metadata,
+            )
+            finalize_run_review_state(item["run_id"])
+            launched, message = launch_rework_for_approval(item, reason)
+            set_ui_notice("success" if launched else "warning", message)
+            st.rerun()
 
 
 def send_test_outbound_email(
@@ -3145,6 +3668,1207 @@ def render_settings() -> None:
                 for member_name, member_role in team["members"]:
                     st.markdown(f"- **{member_name}**: {member_role}")
     return
+
+
+def render_segment_calendar_tab(*, notify_email: str, test_mode: bool) -> None:
+    st.subheader("세그먼트 캘린더")
+    st.caption("세그먼트별 발송 일정을 관리하고, 지난 날짜에는 실제 무엇을 보냈는지 아카이브로 바로 확인합니다.")
+
+    presets = list_segment_presets()
+    preset_lookup = {preset["id"]: preset for preset in presets}
+
+    for preset in presets:
+        preset_title = (
+            f"{preset['label']} | "
+            f"{', '.join(display_country(code) for code in preset['recommended_countries'])} | "
+            f"리드 목표 {preset.get('default_max_companies', '-')}"
+        )
+        with st.expander(preset_title, expanded=False):
+            st.write(preset["description"])
+            st.write(f"오퍼: `{preset['offer']}`")
+            st.write(f"추천 국가: {', '.join(display_country(code) for code in preset['recommended_countries'])}")
+            st.write(f"대상 직책: {', '.join(preset['target_roles'])}")
+            st.write("대표 포트폴리오")
+            for portfolio_row in preset["portfolio"]:
+                st.markdown(f"- {portfolio_row}")
+
+    st.markdown("#### 일정 추가")
+    with st.form("segment_calendar_form", clear_on_submit=False):
+        schedule_date = st.date_input("캘린더 날짜", value=date.today(), key="segment_calendar_form_date")
+        segment_id = st.selectbox(
+            "세그먼트",
+            options=[preset["id"] for preset in presets],
+            format_func=lambda value: preset_lookup[value]["label"],
+            key="segment_calendar_form_segment",
+        )
+        selected_preset = preset_lookup[segment_id]
+        recommended_countries = selected_preset.get("recommended_countries") or COUNTRIES
+        default_country = selected_preset.get("default_country") or recommended_countries[0]
+        target_country = st.selectbox(
+            "대상 국가",
+            options=recommended_countries,
+            index=max(0, recommended_countries.index(default_country)) if default_country in recommended_countries else 0,
+            format_func=lambda code: f"{display_country(code)} ({code})",
+            key="segment_calendar_form_country",
+        )
+        send_window = st.selectbox("발송 시간대", options=["오전", "오후", "종일"], key="segment_calendar_form_window")
+        max_companies = st.number_input(
+            "타깃 리드 수",
+            min_value=1,
+            max_value=50,
+            value=int(selected_preset.get("default_max_companies") or 10),
+            step=1,
+            key="segment_calendar_form_max_companies",
+        )
+        notes = st.text_area("운영 메모", height=90, key="segment_calendar_form_notes")
+        preview_query = (
+            selected_preset.get("country_queries", {}).get(target_country)
+            or selected_preset.get("country_queries", {}).get("default")
+            or ""
+        )
+        st.caption(f"이 일정으로 실행될 기본 탐색 쿼리: `{preview_query}`")
+        submitted = st.form_submit_button("일정 저장", use_container_width=True)
+
+    if submitted:
+        entry = create_segment_calendar_entry(
+            schedule_date=schedule_date,
+            segment_id=segment_id,
+            target_country=target_country,
+            send_window=send_window,
+            max_companies=int(max_companies),
+            notes=notes,
+        )
+        add_segment_calendar_entry(entry)
+        set_ui_notice("success", f"{format_local_date(schedule_date)} 일정에 `{entry['segment_label']}` 세그먼트를 추가했습니다.")
+        st.rerun()
+
+    st.markdown("#### 일정 / 발송 아카이브")
+    selected_date = st.date_input("확인 날짜", value=date.today(), key="segment_calendar_view_date")
+    selected_rows = list_segment_calendar_entries_for_date(selected_date)
+    archive_rows = build_delivery_archive_rows(selected_date)
+    archive_summary = summarize_delivery_archive(archive_rows)
+
+    summary_cols = st.columns(4)
+    summary_cols[0].metric("등록 일정", str(len(selected_rows)))
+    summary_cols[1].metric("발송 완료", str(archive_summary["sent"]))
+    summary_cols[2].metric("차단 / 실패", str(archive_summary["blocked"] + archive_summary["failed"]))
+    summary_cols[3].metric("테스트 발송", str(archive_summary["tests"]))
+
+    if not selected_rows:
+        st.caption(f"{format_local_date(selected_date)}에는 등록된 세그먼트 일정이 없습니다.")
+    else:
+        for row in selected_rows:
+            preset = get_segment_preset(str(row.get("segment_id") or ""))
+            row_title = (
+                f"{row.get('segment_label', '-')} | "
+                f"{display_country(row.get('target_country'))} ({row.get('target_country')}) | "
+                f"{row.get('send_window')} | 목표 {row.get('max_companies')}"
+            )
+            with st.expander(row_title, expanded=False):
+                if preset:
+                    st.write(f"오퍼: `{preset['offer']}`")
+                st.write(f"타깃 리드 목표: `{row.get('max_companies')}`")
+                st.write(f"탐색 쿼리: `{row.get('lead_query') or '-'}`")
+                if row.get("notes"):
+                    st.write(f"메모: {row['notes']}")
+                if row.get("last_launched_at"):
+                    st.caption(f"마지막 실행: {format_local_datetime(row.get('last_launched_at'))}")
+
+                action_left, action_right = st.columns([1.4, 1.0])
+                with action_left:
+                    if st.button("이 일정으로 실행", key=f"segment_calendar_launch_{row['id']}", use_container_width=True):
+                        launch_background_run(
+                            target_country=str(row.get("target_country") or "US"),
+                            lead_query=str(row.get("lead_query") or ""),
+                            lead_mode="region_or_industry",
+                            max_companies=int(row.get("max_companies") or 10),
+                            notify_email=notify_email,
+                            test_mode=test_mode,
+                            trigger_source="segment_calendar",
+                            segment_id=str(row.get("segment_id") or ""),
+                            segment_label=str(row.get("segment_label") or ""),
+                            segment_brief=str(row.get("segment_brief") or ""),
+                        )
+                        mark_segment_calendar_entry_launched(str(row["id"]))
+                        set_ui_notice("success", f"`{row.get('segment_label')}` 일정으로 런을 시작했습니다.")
+                        st.rerun()
+                with action_right:
+                    if st.button("일정 삭제", key=f"segment_calendar_delete_{row['id']}", use_container_width=True):
+                        delete_segment_calendar_entry(str(row["id"]))
+                        set_ui_notice("success", "세그먼트 일정을 삭제했습니다.")
+                        st.rerun()
+
+    st.markdown("#### 날짜별 발송 아카이브")
+    if archive_rows:
+        st.dataframe(
+            [
+                {
+                    "시각": format_local_datetime(row.get("created_at")),
+                    "종류": row.get("kind_label"),
+                    "상태": row.get("status_label"),
+                    "회사명": row.get("company_name"),
+                    "세그먼트": row.get("segment_label"),
+                    "국가": row.get("country_label"),
+                    "수신자": row.get("recipient"),
+                    "제목": row.get("subject"),
+                    "첨부": ", ".join(row.get("attachments") or []) or "-",
+                }
+                for row in archive_rows
+            ],
+            hide_index=True,
+            use_container_width=True,
+        )
+    else:
+        st.info("선택한 날짜의 아웃바운드 발송 기록이 아직 없습니다.")
+
+    daily_rollup = build_daily_delivery_rollup(days=14)
+    if daily_rollup:
+        with st.expander("지난 14일 발송 요약", expanded=False):
+            render_adjustable_dataframe("지난 14일 발송 요약", daily_rollup, "segment_calendar_archive_rollup")
+
+    upcoming_rows = list_upcoming_segment_calendar_entries(days=14)
+    if upcoming_rows:
+        render_adjustable_dataframe(
+            "앞으로 14일 일정",
+            [
+                {
+                    "날짜": format_local_date(date.fromisoformat(str(row["schedule_date"]))),
+                    "시간대": row.get("send_window"),
+                    "세그먼트": row.get("segment_label"),
+                    "국가": display_country(row.get("target_country")),
+                    "리드 목표": row.get("max_companies"),
+                    "탐색 쿼리": row.get("lead_query"),
+                    "마지막 실행": format_local_datetime(row.get("last_launched_at")) if row.get("last_launched_at") else "-",
+                }
+                for row in upcoming_rows
+            ],
+            "segment_calendar_upcoming",
+        )
+
+
+def render_approval_queue(test_recipient: str) -> None:
+    st.subheader("검토 대기")
+    selected_date = st.date_input("생성 날짜", value=date.today(), key="approval_queue_date")
+    st.caption(f"선택 날짜: {format_local_date(selected_date)}")
+
+    waiting = filter_rows_by_date(list_approval_items("waiting_approval"), "created_at", selected_date)
+    recent = [
+        row
+        for row in list_approval_items()
+        if (parse_iso_date(row.get("decided_at")) or parse_iso_date(row.get("created_at"))) == selected_date
+    ]
+    contexts = [build_approval_item_context(item) for item in waiting]
+    urgent_waiting = [context for context in contexts if context["urgent"]]
+    completed_today = [row for row in recent if row.get("status") in {"approved", "rejected"}]
+    high_quality = [context for context in contexts if context["quality_score"] >= 90]
+
+    summary_cols = st.columns(4)
+    summary_cols[0].metric("오늘 검토 건수", str(len(contexts)))
+    summary_cols[1].metric("긴급 처리", str(len(urgent_waiting)))
+    summary_cols[2].metric("오늘 처리 완료", str(len(completed_today)))
+    summary_cols[3].metric("90점 이상 제안서", str(len(high_quality)))
+
+    if not contexts:
+        st.info("검토 대기 중인 항목이 없습니다.")
+        if recent:
+            st.markdown("**최근 처리 이력**")
+            st.dataframe(
+                [
+                    {
+                        "회사명": row.get("company_name") or "-",
+                        "항목": row.get("title") or "-",
+                        "상태": display_status(row.get("status")),
+                        "재작업 대상": format_reroute_targets(row.get("reroute_targets_json")),
+                        "검토 메모": (row.get("rejection_reason") or parse_json_field(row.get("metadata_json"), {}).get("reviewer_note") or "-")[:120],
+                        "처리 시각": format_local_datetime(row.get("decided_at") or row.get("created_at")),
+                    }
+                    for row in recent[:20]
+                ],
+                hide_index=True,
+                use_container_width=True,
+            )
+        return
+
+    countries = ["전체"] + sorted({context["country_label"] for context in contexts if context["country_label"]})
+    segments = ["전체"] + sorted({context["segment_label"] for context in contexts if context["segment_label"]})
+
+    filter_cols = st.columns([1.2, 1.7, 1.1, 1.3])
+    selected_country = filter_cols[0].selectbox("국가", countries, key="approval_filter_country")
+    selected_segment = filter_cols[1].selectbox("세그먼트", segments, key="approval_filter_segment")
+    urgent_only = filter_cols[2].toggle("긴급만", value=False, key="approval_filter_urgent")
+    quality_floor = filter_cols[3].slider("품질 하한", min_value=0, max_value=100, value=0, step=5, key="approval_filter_quality")
+    quick_mode = st.toggle("빠른 처리 모드", value=True, key="approval_quick_mode")
+
+    filtered_contexts: list[dict[str, Any]] = []
+    for context in contexts:
+        if selected_country != "전체" and context["country_label"] != selected_country:
+            continue
+        if selected_segment != "전체" and context["segment_label"] != selected_segment:
+            continue
+        if urgent_only and not context["urgent"]:
+            continue
+        if context["quality_score"] < quality_floor:
+            continue
+        filtered_contexts.append(context)
+
+    filtered_contexts.sort(
+        key=lambda context: (
+            0 if context["urgent"] else 1,
+            -context["priority"],
+            -context["quality_score"],
+            context["item"].get("created_at") or "",
+        )
+    )
+
+    if not filtered_contexts:
+        st.info("현재 필터에 맞는 검토 항목이 없습니다.")
+        return
+
+    if quick_mode:
+        quick_ids = [str(context["item"]["id"]) for context in filtered_contexts]
+        quick_state_key = "approval_quick_selected_id"
+        if st.session_state.get(quick_state_key) not in quick_ids:
+            st.session_state[quick_state_key] = quick_ids[0]
+        current_index = quick_ids.index(st.session_state[quick_state_key])
+        selected_context = filtered_contexts[current_index]
+        selected_item = selected_context["item"]
+
+        nav_left, nav_mid, nav_right = st.columns([1.0, 1.6, 1.0])
+        with nav_left:
+            if st.button("이전 항목", key="approval_quick_prev", use_container_width=True, disabled=current_index == 0):
+                st.session_state[quick_state_key] = quick_ids[current_index - 1]
+                st.rerun()
+        with nav_mid:
+            st.caption(
+                f"빠른 처리 {current_index + 1} / {len(filtered_contexts)} | "
+                f"{selected_item.get('company_name') or '-'} | {selected_item.get('title')}"
+            )
+        with nav_right:
+            if st.button("다음 항목", key="approval_quick_next", use_container_width=True, disabled=current_index == len(quick_ids) - 1):
+                st.session_state[quick_state_key] = quick_ids[current_index + 1]
+                st.rerun()
+
+        with st.container(border=True):
+            header_left, header_right = st.columns([2.6, 1.0])
+            with header_left:
+                st.markdown(f"**{selected_item.get('company_name') or '-'}**")
+                st.caption(f"{selected_context['segment_label']} | {selected_context['country_label']}")
+                st.caption(f"자동 발송 상태: {summarize_auto_delivery(selected_context['metadata'])}")
+            with header_right:
+                st.caption(f"우선순위 {selected_context['priority']}")
+                st.caption(f"생성 시각 {format_local_datetime(selected_item.get('created_at'))}")
+
+            if selected_context["quality"]:
+                quality = selected_context["quality"]
+                quality_text = f"제안서 점수 {quality['score']}점 ({quality['label']})"
+                if quality["missing_sections"]:
+                    quality_text += f" | 빈 섹션: {', '.join(quality['missing_sections'][:3])}"
+                st.caption(quality_text)
+
+            if selected_context["validation_issues"]:
+                issue_labels = [VALIDATION_ISSUE_LABELS.get(value, value) for value in selected_context["validation_issues"][:3]]
+                st.warning("검토 포인트: " + " | ".join(issue_labels))
+
+            blocked_reasons = selected_context["auto_delivery"].get("blocked_reasons") or []
+            if blocked_reasons:
+                st.warning("자동 발송 차단 사유: " + " | ".join(blocked_reasons[:3]))
+
+            if selected_context["urgent"]:
+                st.error("긴급 확인이 필요한 항목입니다. 발송 차단 사유 또는 제안서 이슈를 먼저 확인하세요.")
+
+            render_review_asset_preview(selected_context, key_prefix=f"approval_quick_{selected_item['id']}")
+            render_review_action_panel(
+                selected_context,
+                test_recipient=test_recipient,
+                note_key=f"approval_quick_note_{selected_item['id']}",
+                action_prefix=f"approval_quick_{selected_item['id']}",
+            )
+
+    with st.expander("전체 항목 보기", expanded=not quick_mode):
+        for context in filtered_contexts:
+            item = context["item"]
+            title = f"{item.get('company_name') or '-'} | {item['title']}"
+            with st.container(border=True):
+                top_left, top_right = st.columns([2.6, 1.0])
+                with top_left:
+                    st.markdown(f"**{title}**")
+                    st.caption(f"{context['segment_label']} | {context['country_label']}")
+                    st.caption(f"자동 발송 상태: {summarize_auto_delivery(context['metadata'])}")
+                with top_right:
+                    st.caption(f"우선순위 {context['priority']}")
+                    st.caption(f"품질 {context['quality_score']}점")
+
+                info_line = []
+                if context["urgent"]:
+                    info_line.append("긴급")
+                if context["validation_issues"]:
+                    issue_labels = [VALIDATION_ISSUE_LABELS.get(value, value) for value in context["validation_issues"][:2]]
+                    info_line.append("검토 포인트: " + ", ".join(issue_labels))
+                blocked_reasons = context["auto_delivery"].get("blocked_reasons") or []
+                if blocked_reasons:
+                    info_line.append("차단: " + ", ".join(blocked_reasons[:2]))
+                st.caption(" | ".join(info_line) if info_line else "바로 검토 가능")
+
+                if st.button("빠른 처리로 열기", key=f"approval_focus_{item['id']}", use_container_width=True):
+                    st.session_state["approval_quick_selected_id"] = str(item["id"])
+                    st.session_state["approval_quick_mode"] = True
+                    st.rerun()
+
+    st.markdown("**최근 처리 이력**")
+    st.dataframe(
+        [
+            {
+                "회사명": row.get("company_name") or "-",
+                "항목": row.get("title") or "-",
+                "상태": display_status(row.get("status")),
+                "재작업 대상": format_reroute_targets(row.get("reroute_targets_json")),
+                "검토 메모": (row.get("rejection_reason") or parse_json_field(row.get("metadata_json"), {}).get("reviewer_note") or "-")[:120],
+                "처리 시각": format_local_datetime(row.get("decided_at") or row.get("created_at")),
+            }
+            for row in recent[:20]
+        ],
+        hide_index=True,
+        use_container_width=True,
+    )
+
+
+def render_assets(selected_run: dict[str, Any] | None, *, show_subheader: bool = True, show_summary: bool = True) -> None:
+    if show_subheader:
+        st.subheader("산출물")
+    assets = list_assets(selected_run["id"] if selected_run else None)
+    if not assets:
+        if show_summary:
+            summary_cols = st.columns(4)
+            summary_cols[0].metric("오늘 생성 산출물", "0")
+            summary_cols[1].metric("전체 산출물", "0")
+            summary_cols[2].metric("제안서 원본", "0")
+            summary_cols[3].metric("PDF 완료", "0")
+        st.info("산출물이 아직 없습니다.")
+        return
+
+    asset_summary = summarize_asset_rows(assets)
+    if show_summary:
+        summary_cols = st.columns(4)
+        summary_cols[0].metric("오늘 생성 산출물", str(asset_summary["today_count"]))
+        summary_cols[1].metric("전체 산출물", str(asset_summary["asset_count"]))
+        summary_cols[2].metric("제안서 원본", str(asset_summary["proposal_count"]))
+        summary_cols[3].metric("PDF 완료", str(asset_summary["pdf_count"]))
+
+    companies = sorted({row["company_name"] for row in assets if row.get("company_name")})
+    company_filter = st.selectbox("회사 선택", ["전체"] + companies, index=0)
+    filtered_assets = assets if company_filter == "전체" else [row for row in assets if row.get("company_name") == company_filter]
+
+    st.dataframe(
+        [
+            {
+                "회사명": row["company_name"],
+                "종류": display_asset_type(row["asset_type"]),
+                "이름": row["title"],
+                "상태": display_status(row["status"]),
+                "생성 시각": format_local_datetime(row["created_at"]),
+                "파일명": Path(str(row["path"])).name,
+            }
+            for row in filtered_assets
+        ],
+        hide_index=True,
+        use_container_width=True,
+    )
+
+    labels = [f"{row['company_name']} | {display_asset_type(row['asset_type'])} | {row['title']}" for row in filtered_assets]
+    if not labels:
+        return
+
+    selected_label = st.selectbox("미리 볼 산출물", labels, index=0)
+    selected_asset = filtered_assets[labels.index(selected_label)]
+    asset_path = Path(selected_asset["path"])
+    asset_metadata = parse_json_field(selected_asset.get("metadata_json"), {})
+
+    st.caption(f"선택 파일: {asset_path.name}")
+    if selected_asset["asset_type"] == "proposal":
+        quality = evaluate_proposal_asset(selected_asset)
+        quality_text = f"제안서 점수: {quality['score']}점 ({quality['label']})"
+        if quality["missing_sections"]:
+            quality_text += f" | 빈 섹션: {', '.join(quality['missing_sections'][:4])}"
+        st.caption(quality_text)
+
+    with st.expander("기술 정보", expanded=False):
+        st.caption(f"실행 세그먼트: {get_run_segment_label(selected_run)}" if selected_run else "실행 세그먼트 정보 없음")
+        st.code(str(asset_path), language="text")
+
+    if asset_path.suffix.lower() == ".pdf":
+        data = read_asset_bytes(asset_path, asset_metadata)
+        if data:
+            st.download_button(
+                label="PDF 내려받기",
+                data=data,
+                file_name=asset_path.name,
+                mime="application/pdf",
+                use_container_width=True,
+            )
+            with st.expander("PDF 미리보기", expanded=False):
+                render_pdf_preview(selected_asset, key_prefix=f"asset_preview_{selected_asset['id']}")
+        else:
+            st.warning("PDF 파일을 찾지 못했습니다.")
+    elif asset_path.suffix.lower() == ".docx":
+        data = read_asset_bytes(asset_path, asset_metadata)
+        if data:
+            st.download_button(
+                label="Word 내려받기",
+                data=data,
+                file_name=asset_path.name,
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                use_container_width=True,
+            )
+        else:
+            st.warning("Word 파일을 찾지 못했습니다.")
+    else:
+        st.code(read_asset_content(asset_path, asset_metadata), language="markdown")
+
+
+def render_notifications() -> None:
+    st.subheader("알림 기록")
+    rows = list_notifications()
+    if not rows:
+        st.info("알림 기록이 아직 없습니다.")
+        return
+
+    selected_date = st.date_input("알림 날짜", value=date.today(), key="notifications_date")
+    st.caption(f"선택 날짜: {format_local_date(selected_date)}")
+    rows = filter_rows_by_date(rows, "created_at", selected_date)
+    outbound_rows = build_delivery_archive_rows(selected_date)
+    outbound_summary = summarize_delivery_archive(outbound_rows)
+
+    summary_cols = st.columns(4)
+    summary_cols[0].metric("아웃바운드 이벤트", str(outbound_summary["total"]))
+    summary_cols[1].metric("발송 완료", str(outbound_summary["sent"]))
+    summary_cols[2].metric("차단 / 실패", str(outbound_summary["blocked"] + outbound_summary["failed"]))
+    summary_cols[3].metric("테스트 발송", str(outbound_summary["tests"]))
+
+    if outbound_rows:
+        st.markdown("**오늘의 발송 추적**")
+        st.dataframe(
+            [
+                {
+                    "시각": format_local_datetime(row.get("created_at")),
+                    "종류": row.get("kind_label"),
+                    "상태": row.get("status_label"),
+                    "회사명": row.get("company_name"),
+                    "세그먼트": row.get("segment_label"),
+                    "국가": row.get("country_label"),
+                    "수신자": row.get("recipient"),
+                    "제목": row.get("subject"),
+                }
+                for row in outbound_rows
+            ],
+            hide_index=True,
+            use_container_width=True,
+        )
+
+    if not rows:
+        st.info("선택한 날짜의 알림 기록이 없습니다.")
+        return
+
+    with st.expander("전체 알림 기록", expanded=False):
+        st.dataframe(
+            [
+                {
+                    "시각": format_local_datetime(row["created_at"]),
+                    "종류": OUTBOUND_NOTIFICATION_KIND_LABELS.get(str(row.get("kind") or ""), row.get("kind", "-")),
+                    "상태": display_status(row["status"]),
+                    "제목": row["subject"],
+                    "수신자": row["recipient"],
+                }
+                for row in rows
+            ],
+            hide_index=True,
+            use_container_width=True,
+        )
+
+
+def render_settings() -> None:
+    backend_info = describe_runtime_backend()
+    auto_send_settings = get_auto_send_settings()
+    pipeline_baselines = load_pipeline_baselines()
+    version_info = build_runtime_version_info()
+    baseline_task_names = [
+        "lead_research_task",
+        "identity_disambiguation_task",
+        "lead_verification_task",
+        "website_audit_task",
+        "competitor_analysis_task",
+        "landing_page_task",
+        "marketing_recommendation_task",
+        "proposal_task",
+        "proposal_localization_task",
+        "email_outreach_task",
+        "email_localization_task",
+        "review_station",
+    ]
+    overview_task_names = [
+        "lead_research_task",
+        "identity_disambiguation_task",
+        "lead_verification_task",
+        "website_audit_task",
+        "competitor_analysis_task",
+        "landing_page_task",
+        "marketing_recommendation_task",
+        "proposal_task",
+        "proposal_localization_task",
+        "email_outreach_task",
+        "email_localization_task",
+    ]
+    log_files = list_recent_runtime_logs(limit=5)
+    average_baseline = round(
+        sum(int(pipeline_baselines.get(task_name, DEFAULT_PIPELINE_BASELINES_MINUTES.get(task_name, 5))) for task_name in baseline_task_names)
+        / len(baseline_task_names),
+        1,
+    )
+
+    st.subheader("운영 설정")
+    st.caption("기본 화면에서는 운영에 필요한 값만 보이고, 자세한 환경 정보와 기준값은 아래 섹션에서 조정합니다.")
+
+    with st.container(border=True):
+        version_left, version_mid, version_right = st.columns([1.0, 1.0, 1.8])
+        version_left.markdown("**배포 버전**")
+        version_left.caption(f"{version_info['environment']} | {version_info['service']}")
+        version_mid.metric("커밋", version_info["commit"])
+        version_right.caption(f"브랜치: {version_info['branch']}")
+        version_right.caption(f"빌드 시각: {version_info['build_time']}")
+
+    summary_cols = st.columns(4)
+    summary_cols[0].metric("저장 상태", display_storage_status(backend_info))
+    summary_cols[1].metric("자동 발송 모드", display_delivery_mode(auto_send_settings.mode))
+    summary_cols[2].metric("부서 기준 평균", f"{average_baseline}분")
+    summary_cols[3].metric("최근 로그", f"{len(log_files)}개")
+
+    with st.container(border=True):
+        left, right = st.columns([1.2, 1.0])
+        with left:
+            st.markdown("**현재 운영 요약**")
+            st.caption(
+                f"자동 발송 최소 제안서 점수는 {auto_send_settings.min_proposal_score}점, "
+                f"실행당 최대 {auto_send_settings.max_items_per_run}건까지 처리합니다."
+            )
+            st.caption(
+                f"PDF 첨부는 {'필수' if auto_send_settings.require_pdf else '선택'}이고, "
+                f"기본 알림 메일은 `{os.environ.get('ALERT_EMAIL_TO', ALERT_EMAIL_DEFAULT)}` 입니다."
+            )
+        with right:
+            st.markdown("**조직 / 감시 상태**")
+            st.caption(f"메인 운영 부서는 {len(overview_task_names)}개, 지원 조직은 {len(SUPPORT_TEAM_CONFIG)}개가 연결되어 있습니다.")
+            if auto_send_settings.canary_email:
+                st.caption(f"카나리 수신 메일: `{auto_send_settings.canary_email}`")
+            else:
+                st.caption("카나리 수신 메일은 아직 비어 있습니다.")
+
+    with st.expander("운영 환경", expanded=False):
+        st.write(f"프로젝트 위치: `{PROJECT_ROOT}`")
+        st.write(f"운영 DB: `{DB_PATH}`")
+        st.write(f"파이썬 실행 파일: `{resolve_python_executable()}`")
+        st.write(f"현재 데이터 백엔드: `{backend_info['label']}`")
+        if backend_info.get("remote_url"):
+            st.write(f"Supabase URL: `{backend_info['remote_url']}`")
+        if backend_info.get("storage_bucket"):
+            st.write(f"Supabase Storage 버킷: `{backend_info['storage_bucket']}`")
+        if backend_info["backend"] == "supabase":
+            st.info("현재는 Supabase를 운영 저장소로 사용합니다.")
+        else:
+            st.info("현재는 로컬 SQLite를 운영 저장소로 사용합니다.")
+
+    with st.expander("부서별 예상 소요시간 기준", expanded=False):
+        st.caption("실행 노선도의 ETA 계산에 쓰는 기준값입니다. 실제 운영 흐름에 맞게 분 단위로 조정하세요.")
+        with st.form("pipeline_baseline_form"):
+            inputs: dict[str, int] = {}
+            columns = st.columns(2)
+            for index, task_name in enumerate(baseline_task_names):
+                with columns[index % 2]:
+                    if task_name == "review_station":
+                        department_label = "검토 운영본부"
+                        task_label = "검토 판단 / 재작업 조정"
+                    else:
+                        department_label = DEPARTMENT_CONFIG.get(task_name, {}).get("department", display_task_name(task_name))
+                        task_label = display_task_name(task_name)
+                    inputs[task_name] = int(
+                        st.number_input(
+                            f"{department_label} | {task_label}",
+                            min_value=1,
+                            max_value=180,
+                            value=int(pipeline_baselines.get(task_name, DEFAULT_PIPELINE_BASELINES_MINUTES.get(task_name, 5))),
+                            step=1,
+                            key=f"baseline_{task_name}",
+                        )
+                    )
+            save_submitted = st.form_submit_button("기준 시간 저장", use_container_width=True)
+        if save_submitted:
+            save_pipeline_baselines(inputs)
+            set_ui_notice("success", "부서별 예상 소요시간 기준을 저장했습니다.")
+            st.rerun()
+        if st.button("기본 기준으로 되돌리기", use_container_width=True):
+            save_pipeline_baselines(DEFAULT_PIPELINE_BASELINES_MINUTES)
+            set_ui_notice("success", "부서별 예상 소요시간 기준을 기본값으로 되돌렸습니다.")
+            st.rerun()
+
+    with st.expander("최근 실행 로그", expanded=False):
+        if log_files:
+            selected_log = st.selectbox("로그 파일", [f.name for f in log_files], key="settings_recent_log")
+            log_path = next((path for path in log_files if path.name == selected_log), log_files[0])
+            try:
+                content = read_log_tail(log_path, max_chars=4000)
+                st.code(content or "(비어 있음)", language="text")
+            except Exception as exc:
+                st.warning(f"로그 읽기 실패: {exc}")
+        else:
+            if PIPELINE_LOG_DIR.exists():
+                st.info("로그 파일이 아직 없습니다.")
+            else:
+                st.info(f"로그 디렉터리가 없습니다: {PIPELINE_LOG_DIR}")
+
+    with st.expander("구성현황", expanded=False):
+        st.caption("메인 파이프라인 부서가 어떤 역할과 참여 인원으로 구성되어 있는지 정리한 영역입니다.")
+        for task_name in overview_task_names:
+            department = DEPARTMENT_CONFIG.get(task_name, {})
+            members = get_department_members(task_name)
+            support = department.get("support") or []
+            with st.container(border=True):
+                left, right = st.columns([1.4, 1.0])
+                with left:
+                    st.markdown(f"**{department.get('department', display_task_name(task_name))}**")
+                    st.caption(display_task_name(task_name))
+                    st.write(department.get("summary") or "-")
+                with right:
+                    st.markdown("**참여 인원**")
+                    for member in members:
+                        st.markdown(f"- **{member['name']}** (`{display_task_name(member['crew_label'])}`)")
+                        st.caption(f"맡은 역할: {member['role']}")
+                        st.caption(f"직무 비전: {member['vision']}")
+                    if support:
+                        st.markdown(f"**지원팀**: {', '.join(support)}")
+                    else:
+                        st.caption("지원팀 없음")
+
+    with st.expander("지원 조직", expanded=False):
+        for team in SUPPORT_TEAM_CONFIG:
+            with st.expander(f"{team['department']} | {team['status']}", expanded=False):
+                for member_name, member_role in team["members"]:
+                    st.markdown(f"- **{member_name}**: {member_role}")
+
+
+def render_review_asset_preview(context: dict[str, Any], *, key_prefix: str) -> None:
+    asset_rows = context["asset_rows"]
+    downloadable_assets = context["downloadable_assets"]
+    email_preview = context["email_preview"]
+
+    if not asset_rows:
+        st.info("연결된 산출물이 없습니다.")
+        return
+
+    st.markdown("**생성된 파일**")
+    for row in asset_rows:
+        render_compact_row(
+            title=row["title"],
+            subtitle=display_asset_type(row["asset_type"]),
+            meta=Path(str(row["path"])).name,
+            pill_html=build_status_pill_html(display_status(row.get("status")), tone=tone_for_status(row.get("status"))),
+            accent_tone=tone_for_status(row.get("status")),
+        )
+
+    action_cols = st.columns(2)
+    with action_cols[0]:
+        st.markdown("**제안서 파일 확인**")
+        if downloadable_assets:
+            for asset_row in downloadable_assets:
+                payload = build_downloadable_asset_payload(asset_row)
+                if payload:
+                    render_safe_download_button(
+                        payload,
+                        key=f"{key_prefix}_download_{asset_row['asset_type']}",
+                        use_container_width=True,
+                    )
+        else:
+            st.caption("다운로드 가능한 제안서 파일이 없습니다.")
+
+    with action_cols[1]:
+        st.markdown("**메일 첨부 안내**")
+        if email_preview and email_preview["attachment_names"]:
+            st.caption(", ".join(email_preview["attachment_names"]))
+        else:
+            st.caption("첨부 파일 정보가 아직 없습니다.")
+
+    pdf_asset = context.get("pdf_asset")
+    if pdf_asset:
+        with st.expander("PDF 미리보기", expanded=False):
+            render_pdf_preview(pdf_asset, key_prefix=f"{key_prefix}_pdf")
+
+    proposal_asset = context.get("proposal_asset")
+    if proposal_asset:
+        proposal_path = Path(str(proposal_asset["path"]))
+        proposal_metadata = parse_json_field(proposal_asset.get("metadata_json"), {})
+        with st.expander("제안서 원문 보기", expanded=False):
+            st.code(read_asset_content(proposal_path, proposal_metadata), language="markdown")
+
+    if email_preview:
+        st.markdown("**발송 메일 미리보기**")
+        st.text_input(
+            "메일 제목",
+            value=email_preview["subject"],
+            disabled=True,
+            key=f"{key_prefix}_email_subject",
+        )
+        st.text_area(
+            "메일 본문",
+            value=email_preview["body"],
+            height=240,
+            disabled=True,
+            key=f"{key_prefix}_email_body",
+        )
+
+
+def render_assets(selected_run: dict[str, Any] | None, *, show_subheader: bool = True, show_summary: bool = True) -> None:
+    if show_subheader:
+        st.subheader("산출물")
+    assets = list_assets(selected_run["id"] if selected_run else None)
+    if not assets:
+        if show_summary:
+            summary_cols = st.columns(4)
+            summary_cols[0].metric("오늘 생성 산출물", "0")
+            summary_cols[1].metric("전체 산출물", "0")
+            summary_cols[2].metric("제안서 원본", "0")
+            summary_cols[3].metric("PDF 완료", "0")
+        st.info("산출물이 아직 없습니다.")
+        return
+
+    asset_summary = summarize_asset_rows(assets)
+    if show_summary:
+        summary_cols = st.columns(4)
+        summary_cols[0].metric("오늘 생성 산출물", str(asset_summary["today_count"]))
+        summary_cols[1].metric("전체 산출물", str(asset_summary["asset_count"]))
+        summary_cols[2].metric("제안서 원본", str(asset_summary["proposal_count"]))
+        summary_cols[3].metric("PDF 완료", str(asset_summary["pdf_count"]))
+
+    companies = sorted({row["company_name"] for row in assets if row.get("company_name")})
+    company_filter = st.selectbox("회사 선택", ["전체"] + companies, index=0)
+    filtered_assets = assets if company_filter == "전체" else [row for row in assets if row.get("company_name") == company_filter]
+
+    st.markdown("**파일 목록**")
+    for row in filtered_assets:
+        render_compact_row(
+            title=row["title"],
+            subtitle=f"{row['company_name']} | {display_asset_type(row['asset_type'])}",
+            meta=f"{format_local_datetime(row['created_at'])} | {Path(str(row['path'])).name}",
+            pill_html=build_status_pill_html(display_status(row.get("status")), tone=tone_for_status(row.get("status"))),
+            accent_tone=tone_for_status(row.get("status")),
+        )
+
+    labels = [f"{row['company_name']} | {display_asset_type(row['asset_type'])} | {row['title']}" for row in filtered_assets]
+    if not labels:
+        return
+
+    selected_label = st.selectbox("미리 볼 산출물", labels, index=0)
+    selected_asset = filtered_assets[labels.index(selected_label)]
+    asset_path = Path(selected_asset["path"])
+    asset_metadata = parse_json_field(selected_asset.get("metadata_json"), {})
+
+    st.caption(f"선택 파일: {asset_path.name}")
+    if selected_asset["asset_type"] == "proposal":
+        quality = evaluate_proposal_asset(selected_asset)
+        quality_text = f"제안서 점수: {quality['score']}점 ({quality['label']})"
+        if quality["missing_sections"]:
+            quality_text += f" | 빈 섹션: {', '.join(quality['missing_sections'][:4])}"
+        st.caption(quality_text)
+
+    if asset_path.suffix.lower() == ".pdf":
+        data = read_asset_bytes(asset_path, asset_metadata)
+        if data:
+            render_safe_download_button(
+                {
+                    "label": "PDF 내려받기",
+                    "data": data,
+                    "file_name": asset_path.name,
+                    "mime": "application/pdf",
+                },
+                key=f"asset_pdf_download_{selected_asset['id']}",
+                use_container_width=True,
+            )
+            with st.expander("PDF 미리보기", expanded=False):
+                render_pdf_preview(selected_asset, key_prefix=f"asset_preview_{selected_asset['id']}")
+        else:
+            st.warning("PDF 파일을 찾지 못했습니다.")
+    elif asset_path.suffix.lower() == ".docx":
+        data = read_asset_bytes(asset_path, asset_metadata)
+        if data:
+            render_safe_download_button(
+                {
+                    "label": "Word 내려받기",
+                    "data": data,
+                    "file_name": asset_path.name,
+                    "mime": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                },
+                key=f"asset_docx_download_{selected_asset['id']}",
+                use_container_width=True,
+            )
+        else:
+            st.warning("Word 파일을 찾지 못했습니다.")
+
+        preview_source = next(
+            (
+                row
+                for row in filtered_assets
+                if row.get("company_name") == selected_asset.get("company_name") and row.get("asset_type") == "proposal"
+            ),
+            None,
+        )
+        if preview_source:
+            preview_path = Path(str(preview_source["path"]))
+            preview_metadata = parse_json_field(preview_source.get("metadata_json"), {})
+            with st.expander("제안서 원문 보기", expanded=False):
+                st.code(read_asset_content(preview_path, preview_metadata), language="markdown")
+    else:
+        st.code(read_asset_content(asset_path, asset_metadata), language="markdown")
+
+    with st.expander("기술 정보", expanded=False):
+        st.caption(f"실행 세그먼트: {get_run_segment_label(selected_run)}" if selected_run else "실행 세그먼트 정보 없음")
+        st.code(str(asset_path), language="text")
+
+
+def render_segment_calendar_tab(*, notify_email: str, test_mode: bool) -> None:
+    st.subheader("세그먼트 캘린더")
+    st.caption("세그먼트별 발송 일정과 실제 발송 기록을 같은 캘린더 문맥에서 관리합니다.")
+
+    presets = list_segment_presets()
+    preset_lookup = {preset["id"]: preset for preset in presets}
+
+    for preset in presets:
+        preset_title = (
+            f"{preset['label']} | "
+            f"{', '.join(display_country(code) for code in preset['recommended_countries'])} | "
+            f"리드 목표 {preset.get('default_max_companies', '-')}"
+        )
+        with st.expander(preset_title, expanded=False):
+            st.write(preset["description"])
+            st.write(f"오퍼: `{preset['offer']}`")
+            st.write(f"추천 국가: {', '.join(display_country(code) for code in preset['recommended_countries'])}")
+            st.write(f"대상 직책: {', '.join(preset['target_roles'])}")
+            st.write("대표 포트폴리오")
+            for portfolio_row in preset["portfolio"]:
+                st.markdown(f"- {portfolio_row}")
+
+    st.markdown("#### 일정 추가")
+    with st.form("segment_calendar_form", clear_on_submit=False):
+        schedule_date = st.date_input("캘린더 날짜", value=date.today(), key="segment_calendar_form_date")
+        segment_id = st.selectbox(
+            "세그먼트",
+            options=[preset["id"] for preset in presets],
+            format_func=lambda value: preset_lookup[value]["label"],
+            key="segment_calendar_form_segment",
+        )
+        selected_preset = preset_lookup[segment_id]
+        recommended_countries = selected_preset.get("recommended_countries") or COUNTRIES
+        default_country = selected_preset.get("default_country") or recommended_countries[0]
+        target_country = st.selectbox(
+            "대상 국가",
+            options=recommended_countries,
+            index=max(0, recommended_countries.index(default_country)) if default_country in recommended_countries else 0,
+            format_func=lambda code: f"{display_country(code)} ({code})",
+            key="segment_calendar_form_country",
+        )
+        send_window = st.selectbox("발송 시간대", options=["오전", "오후", "종일"], key="segment_calendar_form_window")
+        max_companies = st.number_input("타깃 리드 수", min_value=1, max_value=50, value=int(selected_preset.get("default_max_companies") or 10), step=1, key="segment_calendar_form_max_companies")
+        notes = st.text_area("운영 메모", height=90, key="segment_calendar_form_notes")
+        preview_query = (
+            selected_preset.get("country_queries", {}).get(target_country)
+            or selected_preset.get("country_queries", {}).get("default")
+            or ""
+        )
+        st.caption(f"이 일정으로 실행될 기본 탐색 쿼리: `{preview_query}`")
+        submitted = st.form_submit_button("일정 저장", use_container_width=True)
+
+    if submitted:
+        entry = create_segment_calendar_entry(
+            schedule_date=schedule_date,
+            segment_id=segment_id,
+            target_country=target_country,
+            send_window=send_window,
+            max_companies=int(max_companies),
+            notes=notes,
+        )
+        add_segment_calendar_entry(entry)
+        set_ui_notice("success", f"{format_local_date(schedule_date)} 일정에 `{entry['segment_label']}` 세그먼트를 추가했습니다.")
+        st.rerun()
+
+    st.markdown("#### 일정 / 발송 아카이브")
+    selected_date = st.date_input("확인 날짜", value=date.today(), key="segment_calendar_view_date")
+    selected_rows = list_segment_calendar_entries_for_date(selected_date)
+    archive_rows = build_delivery_archive_rows(selected_date)
+    archive_summary = summarize_delivery_archive(archive_rows)
+
+    summary_cols = st.columns(4)
+    summary_cols[0].metric("등록 일정", str(len(selected_rows)))
+    summary_cols[1].metric("발송 완료", str(archive_summary["sent"]))
+    summary_cols[2].metric("차단 / 실패", str(archive_summary["blocked"] + archive_summary["failed"]))
+    summary_cols[3].metric("테스트 발송", str(archive_summary["tests"]))
+
+    if not selected_rows:
+        st.caption(f"{format_local_date(selected_date)}에는 등록된 세그먼트 일정이 없습니다.")
+    else:
+        for row in selected_rows:
+            preset = get_segment_preset(str(row.get("segment_id") or ""))
+            row_title = (
+                f"{row.get('segment_label', '-')} | "
+                f"{display_country(row.get('target_country'))} ({row.get('target_country')}) | "
+                f"{row.get('send_window')} | 목표 {row.get('max_companies')}"
+            )
+            with st.expander(row_title, expanded=False):
+                if preset:
+                    st.write(f"오퍼: `{preset['offer']}`")
+                st.write(f"타깃 리드 목표: `{row.get('max_companies')}`")
+                st.write(f"탐색 쿼리: `{row.get('lead_query') or '-'}`")
+                if row.get("notes"):
+                    st.write(f"메모: {row['notes']}")
+                if row.get("last_launched_at"):
+                    st.caption(f"마지막 실행: {format_local_datetime(row.get('last_launched_at'))}")
+
+                action_left, action_right = st.columns([1.4, 1.0])
+                with action_left:
+                    if st.button("이 일정으로 실행", key=f"segment_calendar_launch_{row['id']}", use_container_width=True):
+                        launch_background_run(
+                            target_country=str(row.get("target_country") or "US"),
+                            lead_query=str(row.get("lead_query") or ""),
+                            lead_mode="region_or_industry",
+                            max_companies=int(row.get("max_companies") or 10),
+                            notify_email=notify_email,
+                            test_mode=test_mode,
+                            trigger_source="segment_calendar",
+                            segment_id=str(row.get("segment_id") or ""),
+                            segment_label=str(row.get("segment_label") or ""),
+                            segment_brief=str(row.get("segment_brief") or ""),
+                        )
+                        mark_segment_calendar_entry_launched(str(row["id"]))
+                        set_ui_notice("success", f"`{row.get('segment_label')}` 일정으로 런을 시작했습니다.")
+                        st.rerun()
+                with action_right:
+                    if st.button("일정 삭제", key=f"segment_calendar_delete_{row['id']}", use_container_width=True):
+                        delete_segment_calendar_entry(str(row["id"]))
+                        set_ui_notice("success", "세그먼트 일정을 삭제했습니다.")
+                        st.rerun()
+
+    st.markdown("#### 날짜별 발송 아카이브")
+    if archive_rows:
+        for row in archive_rows:
+            render_compact_row(
+                title=row.get("subject") or "-",
+                subtitle=f"{row.get('company_name')} | {row.get('segment_label')} | {row.get('country_label')}",
+                meta=f"{format_local_datetime(row.get('created_at'))} | {row.get('recipient')} | {', '.join(row.get('attachments') or []) or '-'}",
+                pill_html=build_status_pill_html(row.get("status_label") or "-", tone=tone_for_status(row.get("status"))),
+                accent_tone=tone_for_status(row.get("status")),
+            )
+    else:
+        st.info("선택한 날짜의 아웃바운드 발송 기록이 아직 없습니다.")
+
+    daily_rollup = build_daily_delivery_rollup(days=14)
+    if daily_rollup:
+        with st.expander("지난 14일 발송 요약", expanded=False):
+            render_adjustable_dataframe("지난 14일 발송 요약", daily_rollup, "segment_calendar_archive_rollup")
+
+
+def render_approval_queue(test_recipient: str) -> None:
+    st.subheader("검토 대기")
+    selected_date = st.date_input("생성 날짜", value=date.today(), key="approval_queue_date")
+    st.caption(f"선택 날짜: {format_local_date(selected_date)}")
+
+    waiting = filter_rows_by_date(list_approval_items("waiting_approval"), "created_at", selected_date)
+    recent = [
+        row
+        for row in list_approval_items()
+        if (parse_iso_date(row.get("decided_at")) or parse_iso_date(row.get("created_at"))) == selected_date
+    ]
+    contexts = [build_approval_item_context(item) for item in waiting]
+    urgent_waiting = [context for context in contexts if context["urgent"]]
+    completed_today = [row for row in recent if row.get("status") in {"approved", "rejected"}]
+    high_quality = [context for context in contexts if context["quality_score"] >= 90]
+
+    summary_cols = st.columns(4)
+    summary_cols[0].metric("오늘 검토 건수", str(len(contexts)))
+    summary_cols[1].metric("긴급 처리", str(len(urgent_waiting)))
+    summary_cols[2].metric("오늘 처리 완료", str(len(completed_today)))
+    summary_cols[3].metric("90점 이상 제안서", str(len(high_quality)))
+
+    countries = ["전체"] + sorted({context["country_label"] for context in contexts if context["country_label"]})
+    segments = ["전체"] + sorted({context["segment_label"] for context in contexts if context["segment_label"]})
+    filter_cols = st.columns([1.2, 1.7, 1.1, 1.3])
+    selected_country = filter_cols[0].selectbox("국가", countries, key="approval_filter_country")
+    selected_segment = filter_cols[1].selectbox("세그먼트", segments, key="approval_filter_segment")
+    urgent_only = filter_cols[2].toggle("긴급만", value=False, key="approval_filter_urgent")
+    quality_floor = filter_cols[3].slider("품질 하한", min_value=0, max_value=100, value=0, step=5, key="approval_filter_quality")
+    quick_mode = st.toggle("빠른 처리 모드", value=True, key="approval_quick_mode")
+
+    filtered_contexts: list[dict[str, Any]] = []
+    for context in contexts:
+        if selected_country != "전체" and context["country_label"] != selected_country:
+            continue
+        if selected_segment != "전체" and context["segment_label"] != selected_segment:
+            continue
+        if urgent_only and not context["urgent"]:
+            continue
+        if context["quality_score"] < quality_floor:
+            continue
+        filtered_contexts.append(context)
+
+    filtered_contexts.sort(
+        key=lambda context: (
+            0 if context["urgent"] else 1,
+            -context["priority"],
+            -context["quality_score"],
+            context["item"].get("created_at") or "",
+        )
+    )
+
+    if not filtered_contexts:
+        st.info("현재 필터에 맞는 검토 항목이 없습니다.")
+    else:
+        if quick_mode:
+            quick_ids = [str(context["item"]["id"]) for context in filtered_contexts]
+            quick_state_key = "approval_quick_selected_id"
+            if st.session_state.get(quick_state_key) not in quick_ids:
+                st.session_state[quick_state_key] = quick_ids[0]
+            current_index = quick_ids.index(st.session_state[quick_state_key])
+            selected_context = filtered_contexts[current_index]
+            selected_item = selected_context["item"]
+
+            nav_left, nav_mid, nav_right = st.columns([1.0, 1.6, 1.0])
+            with nav_left:
+                if st.button("이전 항목", key="approval_quick_prev", use_container_width=True, disabled=current_index == 0):
+                    st.session_state[quick_state_key] = quick_ids[current_index - 1]
+                    st.rerun()
+            with nav_mid:
+                st.caption(
+                    f"빠른 처리 {current_index + 1} / {len(filtered_contexts)} | "
+                    f"{selected_item.get('company_name') or '-'} | {selected_item.get('title')}"
+                )
+            with nav_right:
+                if st.button("다음 항목", key="approval_quick_next", use_container_width=True, disabled=current_index == len(quick_ids) - 1):
+                    st.session_state[quick_state_key] = quick_ids[current_index + 1]
+                    st.rerun()
+
+            with st.container(border=True):
+                header_left, header_right = st.columns([2.6, 1.0])
+                with header_left:
+                    st.markdown(f"**{selected_item.get('company_name') or '-'}**")
+                    st.caption(f"{selected_context['segment_label']} | {selected_context['country_label']}")
+                    st.caption(f"자동 발송 상태: {summarize_auto_delivery(selected_context['metadata'])}")
+                with header_right:
+                    st.caption(f"우선순위 {selected_context['priority']}")
+                    st.caption(f"생성 시각 {format_local_datetime(selected_item.get('created_at'))}")
+
+                if selected_context["quality"]:
+                    quality = selected_context["quality"]
+                    quality_text = f"제안서 점수 {quality['score']}점 ({quality['label']})"
+                    if quality["missing_sections"]:
+                        quality_text += f" | 빈 섹션: {', '.join(quality['missing_sections'][:3])}"
+                    st.caption(quality_text)
+
+                if selected_context["validation_issues"]:
+                    issue_labels = [VALIDATION_ISSUE_LABELS.get(value, value) for value in selected_context["validation_issues"][:3]]
+                    st.warning("검토 포인트: " + " | ".join(issue_labels))
+
+                blocked_reasons = selected_context["auto_delivery"].get("blocked_reasons") or []
+                if blocked_reasons:
+                    st.warning("자동 발송 차단 사유: " + " | ".join(blocked_reasons[:3]))
+
+                if selected_context["urgent"]:
+                    st.error("긴급 확인이 필요한 항목입니다. 발송 차단 사유 또는 제안서 이슈를 먼저 확인하세요.")
+
+                render_review_asset_preview(selected_context, key_prefix=f"approval_quick_{selected_item['id']}")
+                render_review_action_panel(
+                    selected_context,
+                    test_recipient=test_recipient,
+                    note_key=f"approval_quick_note_{selected_item['id']}",
+                    action_prefix=f"approval_quick_{selected_item['id']}",
+                )
+
+        with st.expander("전체 항목 보기", expanded=not quick_mode):
+            for context in filtered_contexts:
+                item = context["item"]
+                render_compact_row(
+                    title=f"{item.get('company_name') or '-'} | {item['title']}",
+                    subtitle=f"{context['segment_label']} | {context['country_label']}",
+                    meta=f"우선순위 {context['priority']} | 품질 {context['quality_score']}점",
+                    pill_html=build_status_pill_html("검토 대기", tone="amber"),
+                    accent_tone="amber",
+                )
+                if st.button("빠른 처리로 열기", key=f"approval_focus_{item['id']}", use_container_width=True):
+                    st.session_state["approval_quick_selected_id"] = str(item["id"])
+                    st.session_state["approval_quick_mode"] = True
+                    st.rerun()
+
+    st.markdown("**최근 처리 이력**")
+    rework_lookup = build_rework_state_lookup(recent)
+    if not recent:
+        st.caption("오늘 처리한 검토 이력이 아직 없습니다.")
+    else:
+        for row in recent[:20]:
+            item_id = str(row.get("id") or "")
+            state = rework_lookup.get(item_id)
+            if state:
+                pill_html = build_status_pill_html(state["label"], tone=state["tone"], spinning=bool(state.get("spinning")))
+                accent_tone = state["tone"]
+            else:
+                pill_html = build_status_pill_html(display_status(row.get("status")), tone=tone_for_status(row.get("status")))
+                accent_tone = tone_for_status(row.get("status"))
+            render_compact_row(
+                title=f"{row.get('company_name') or '-'} | {row.get('title') or '-'}",
+                subtitle=format_reroute_targets(row.get("reroute_targets_json")),
+                meta=f"{format_local_datetime(row.get('decided_at') or row.get('created_at'))} | {(row.get('rejection_reason') or parse_json_field(row.get('metadata_json'), {}).get('reviewer_note') or '-')[:120]}",
+                pill_html=pill_html,
+                accent_tone=accent_tone,
+            )
+
+
+def render_notifications() -> None:
+    st.subheader("알림 기록")
+    rows = list_notifications()
+    if not rows:
+        st.info("알림 기록이 아직 없습니다.")
+        return
+
+    selected_date = st.date_input("알림 날짜", value=date.today(), key="notifications_date")
+    st.caption(f"선택 날짜: {format_local_date(selected_date)}")
+    rows = filter_rows_by_date(rows, "created_at", selected_date)
+    outbound_rows = build_delivery_archive_rows(selected_date)
+    outbound_summary = summarize_delivery_archive(outbound_rows)
+
+    summary_cols = st.columns(4)
+    summary_cols[0].metric("아웃바운드 이벤트", str(outbound_summary["total"]))
+    summary_cols[1].metric("발송 완료", str(outbound_summary["sent"]))
+    summary_cols[2].metric("차단 / 실패", str(outbound_summary["blocked"] + outbound_summary["failed"]))
+    summary_cols[3].metric("테스트 발송", str(outbound_summary["tests"]))
+
+    if outbound_rows:
+        st.markdown("**오늘의 발송 추적**")
+        for row in outbound_rows:
+            render_compact_row(
+                title=row.get("subject") or "-",
+                subtitle=f"{row.get('company_name')} | {row.get('segment_label')} | {row.get('country_label')}",
+                meta=f"{format_local_datetime(row.get('created_at'))} | {row.get('recipient')}",
+                pill_html=build_status_pill_html(row.get("status_label") or "-", tone=tone_for_status(row.get("status"))),
+                accent_tone=tone_for_status(row.get("status")),
+            )
+
+    if rows:
+        with st.expander("전체 알림 기록", expanded=False):
+            st.dataframe(
+                [
+                    {
+                        "시각": format_local_datetime(row["created_at"]),
+                        "종류": OUTBOUND_NOTIFICATION_KIND_LABELS.get(str(row.get("kind") or ""), row.get("kind", "-")),
+                        "상태": display_status(row["status"]),
+                        "제목": row["subject"],
+                        "수신자": row["recipient"],
+                    }
+                    for row in rows
+                ],
+                hide_index=True,
+                use_container_width=True,
+            )
 
 
 def main() -> None:

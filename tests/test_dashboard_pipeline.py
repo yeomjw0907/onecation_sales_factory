@@ -222,6 +222,75 @@ class DashboardPipelineTests(unittest.TestCase):
             )
         )
 
+    @patch("web_dashboard.get_run")
+    @patch("web_dashboard.list_notifications")
+    def test_build_delivery_archive_rows_enriches_outbound_notifications(
+        self,
+        mock_list_notifications,
+        mock_get_run,
+    ) -> None:
+        mock_list_notifications.return_value = [
+            {
+                "run_id": "run-1",
+                "kind": "auto_delivery",
+                "status": "sent",
+                "subject": "Proposal delivery",
+                "recipient": "ops@example.com",
+                "created_at": "2026-04-03T09:30:00",
+                "metadata_json": {"company_name": "Acme", "attachments": ["proposal.pdf"]},
+            },
+            {
+                "run_id": "run-1",
+                "kind": "email",
+                "status": "sent",
+                "subject": "internal",
+                "recipient": "ops@example.com",
+                "created_at": "2026-04-03T09:31:00",
+                "metadata_json": {},
+            },
+        ]
+        mock_get_run.return_value = {"target_country": "KR", "inputs_json": {"segment_label": "교육기관"}}
+
+        rows = web_dashboard.build_delivery_archive_rows(web_dashboard.date(2026, 4, 3))
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["kind_label"], "자동 발송")
+        self.assertEqual(rows[0]["company_name"], "Acme")
+        self.assertEqual(rows[0]["segment_label"], "교육기관")
+        self.assertEqual(rows[0]["country_label"], "한국")
+        self.assertEqual(rows[0]["attachments"], ["proposal.pdf"])
+
+    @patch("web_dashboard.list_notifications")
+    def test_build_daily_delivery_rollup_aggregates_by_day(self, mock_list_notifications) -> None:
+        today = web_dashboard.date.today()
+        yesterday = today - web_dashboard.timedelta(days=1)
+        mock_list_notifications.return_value = [
+            {
+                "kind": "auto_delivery",
+                "status": "sent",
+                "created_at": f"{today.isoformat()}T09:30:00",
+            },
+            {
+                "kind": "test_outbound_email",
+                "status": "failed",
+                "created_at": f"{today.isoformat()}T10:00:00",
+            },
+            {
+                "kind": "auto_delivery",
+                "status": "blocked",
+                "created_at": f"{yesterday.isoformat()}T11:00:00",
+            },
+        ]
+
+        rows = web_dashboard.build_daily_delivery_rollup(days=2, limit=20)
+
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["발송 기록"], 2)
+        self.assertEqual(rows[0]["sent"], 1)
+        self.assertEqual(rows[0]["failed"], 1)
+        self.assertEqual(rows[0]["test"], 1)
+        self.assertEqual(rows[1]["blocked"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()
