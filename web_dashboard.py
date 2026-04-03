@@ -3158,7 +3158,9 @@ def main() -> None:
     running_run = query_running_run()
     latest_run = list_runs(limit=1)
     latest_run = latest_run[0] if latest_run else None
-    if "dashboard_auto_refresh_enabled" not in st.session_state:
+    if st.session_state.pop("dashboard_auto_refresh_enable_pending", False):
+        st.session_state["dashboard_auto_refresh_enabled"] = True
+    elif "dashboard_auto_refresh_enabled" not in st.session_state:
         st.session_state["dashboard_auto_refresh_enabled"] = bool(running_run)
 
     with st.sidebar:
@@ -3238,7 +3240,7 @@ def main() -> None:
                             notify_email=notify_email.strip(),
                             test_mode=test_mode,
                         )
-                        st.session_state["dashboard_auto_refresh_enabled"] = True
+                        st.session_state["dashboard_auto_refresh_enable_pending"] = True
                         st.session_state["run_just_launched"] = True
                         set_ui_notice("success", "실행을 시작했습니다. 실행 현황 탭에서 진행 상태를 확인하세요.")
                         st.rerun()
